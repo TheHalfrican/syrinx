@@ -133,6 +133,12 @@ class QwenBackend:
         log.info("cloned voice %r -> %s", name, voice_id)
         return voice_id
 
+    def invalidate_profile(self, profile_id: str) -> None:
+        """Forget a profile's cached clone prompt so it rebuilds from samples."""
+        self._prompts.pop(profile_id, None)
+        (self._voices_dir / f"{profile_id}.pt").unlink(missing_ok=True)
+        (self._voices_dir / f"{profile_id}_combined.wav").unlink(missing_ok=True)
+
     def _get_prompt(self, voice_id: str):
         if voice_id not in self._prompts:
             import torch
@@ -166,4 +172,67 @@ class QwenBackend:
             return np.asarray(audio).astype(np.float32).tobytes(), int(sample_rate)
 
         log.info("synthesize [qwen %s] (%s): %r", self.model_size, voice_id, text[:60])
+        return await asyncio.to_thread(_run)
+
+    # --- profile-based cloning -----------------------------------------
+
+    def _combine_samples(self, profile) -> tuple[str, str]:
+        """Concatenate a profile's reference samples into one WAV + joined text."""
+        import soundfile as sf
+
+        audios, texts, rate = [], [], 24_000
+        for s in profile.samples:
+            audio, rate = sf.read(s.audio_path, dtype="float32")
+            if getattr(audio, "ndim", 1) > 1:
+                audio = audio.mean(axis=1)  # to mono
+            audios.append(audio)
+            if s.reference_text:
+                texts.append(s.reference_text)
+        if not audios:
+            raise ValueError(f"profile {profile.id} has no samples to clone from")
+        combined = np.concatenate(audios).astype(np.float32)
+        out = self._voices_dir / f"{profile.id}_combined.wav"
+        sf.write(out, combined, rate)
+        return str(out), " ".join(texts)
+
+    def _profile_prompt(self, profile):
+        key = profile.id
+        if key in self._prompts:
+            return self._prompts[key]
+        import torch
+
+        cache = self._voices_dir / f"{key}.pt"
+        if cache.exists():
+            self._prompts[key] = torch.load(cache, map_location=self.device, weights_only=False)
+            return self._prompts[key]
+        audio, text = self._combine_samples(profile)
+        prompt = self._model.create_voice_clone_prompt(
+            ref_audio=audio, ref_text=text, x_vector_only_mode=False
+        )
+        torch.save(prompt, cache)
+        self._prompts[key] = prompt
+        return prompt
+
+    async def synthesize_profile(self, profile, text: str, instruct: str = "") -> tuple[bytes, int]:
+        await self.load()
+
+        def _run() -> tuple[bytes, int]:
+            prompt = self._profile_prompt(profile)
+            wavs, sample_rate = self._model.generate_voice_clone(
+                text=text,
+                voice_clone_prompt=prompt,
+                language="english",
+                instruct=instruct or None,
+            )
+            audio = wavs[0]
+            try:
+                import torch
+
+                if isinstance(audio, torch.Tensor):
+                    audio = audio.detach().cpu().numpy()
+            except Exception:  # noqa: BLE001
+                pass
+            return np.asarray(audio).astype(np.float32).tobytes(), int(sample_rate)
+
+        log.info("synthesize_profile [qwen %s] (%s): %r", self.model_size, profile.id, text[:60])
         return await asyncio.to_thread(_run)

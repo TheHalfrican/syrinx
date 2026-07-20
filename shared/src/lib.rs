@@ -42,6 +42,29 @@ pub trait Engine {
     /// profile id. `ref_text` is required by the Qwen cloning backend.
     fn clone_voice(&self, name: &str, sample_path: &str, ref_text: &str) -> zbus::Result<String>;
 
+    /// Create a voice profile from a JSON spec; returns the profile id.
+    fn create_profile(&self, spec_json: &str) -> zbus::Result<String>;
+
+    /// List voice profiles as a JSON array of summaries.
+    fn list_profiles(&self) -> zbus::Result<String>;
+
+    /// Full profile as JSON (empty string if not found).
+    fn get_profile(&self, profile_id: &str) -> zbus::Result<String>;
+
+    /// Apply a JSON patch of editable fields (name/description/language/personality/default_engine).
+    fn update_profile(&self, profile_id: &str, patch_json: &str) -> zbus::Result<()>;
+
+    /// Delete a profile and its samples.
+    fn delete_profile(&self, profile_id: &str) -> zbus::Result<()>;
+
+    /// Add a reference sample (an audio file path) to a cloned profile. An empty
+    /// `reference_text` auto-transcribes via whisper. Returns JSON
+    /// {sample_id, reference_text}.
+    fn add_sample(&self, profile_id: &str, audio_path: &str, reference_text: &str) -> zbus::Result<String>;
+
+    /// Delete a reference sample.
+    fn delete_sample(&self, sample_id: &str) -> zbus::Result<()>;
+
     /// Cancel an in-flight generation.
     fn cancel(&self, gen_id: u32) -> zbus::Result<()>;
 

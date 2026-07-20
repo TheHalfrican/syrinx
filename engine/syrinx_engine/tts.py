@@ -1,41 +1,86 @@
-"""Text-to-speech facade.
+"""Text-to-speech router.
 
-Delegates to a backend selected by ``SYRINX_TTS_ENGINE`` (default: kokoro):
-  - kokoro — preset voices, CPU-realtime (this box).
-  - qwen   — Qwen3-TTS zero-shot voice cloning (the RTX 4090).
+Voices come from two places:
+  - **built-in presets** from a preset engine (Kokoro) — always available.
+  - **user profiles** (ProfileStore) — preset or cloned.
 
-The public interface is unchanged, so the D-Bus service, PipeWire playback, and
-Slint UI don't care which engine is active. Backends live in ``backends/``.
+`synthesize(voice_id, ...)` routes each voice to the right backend:
+  - "builtin:<engine>:<voice>"  -> that preset engine
+  - a profile id (preset)        -> the profile's preset engine
+  - a profile id (cloned)        -> the profile's cloning engine (Qwen/…), which
+                                    builds a voice prompt from the profile samples
+
+Backends live in `backends/` and are selected per-voice, lazily instantiated.
+`SYRINX_TTS_ENGINE` still sets the default CLONING engine for new cloned voices.
 """
 
 import logging
+import os
 
-from .backends import VoiceInfo, make_backend  # noqa: F401  (VoiceInfo re-exported)
+from .backends import VoiceInfo, detect_device, make_backend
+from .profiles import Profile, ProfileStore
 
 log = logging.getLogger("syrinx.engine.tts")
 
+# Preset engine whose built-in voices are always offered in the voice list.
+BUILTIN_PRESET_ENGINE = "kokoro"
+# Default engine used when cloning a new voice.
+DEFAULT_CLONE_ENGINE = os.environ.get("SYRINX_TTS_ENGINE", "qwen")
+if DEFAULT_CLONE_ENGINE == "kokoro":  # kokoro can't clone; fall back
+    DEFAULT_CLONE_ENGINE = "qwen"
+
 
 class SpeechSynthesizer:
-    def __init__(self) -> None:
-        self._backend = make_backend()
-        # Exposed as the D-Bus `Backend` property (cuda | rocm | cpu).
-        self.backend = self._backend.device
-        self.supports_cloning = self._backend.supports_cloning
-        log.info(
-            "TTS engine=%s device=%s cloning=%s",
-            type(self._backend).__name__,
-            self.backend,
-            self.supports_cloning,
-        )
+    def __init__(self, profiles: ProfileStore) -> None:
+        self._profiles = profiles
+        self._backends: dict[str, object] = {}
+        self.backend = detect_device()  # exposed as the D-Bus Backend property
+        self.supports_cloning = True
+
+    def _be(self, engine: str):
+        if engine not in self._backends:
+            self._backends[engine] = make_backend(engine)
+        return self._backends[engine]
 
     async def load(self) -> None:
-        await self._backend.load()
+        # Warm the built-in preset engine so preset voices are instant.
+        await self._be(BUILTIN_PRESET_ENGINE).load()
 
     async def list_voices(self) -> list[VoiceInfo]:
-        return await self._backend.list_voices()
+        voices: list[VoiceInfo] = []
+        for v in await self._be(BUILTIN_PRESET_ENGINE).list_voices():
+            voices.append(VoiceInfo(f"builtin:{BUILTIN_PRESET_ENGINE}:{v.id}", v.name))
+        for p in self._profiles.list():
+            voices.append(VoiceInfo(p.id, p.name))
+        return voices
 
-    async def synthesize(self, text: str, voice_id: str) -> tuple[bytes, int]:
-        return await self._backend.synthesize(text, voice_id)
+    async def synthesize(self, text: str, voice_id: str, instruct: str = "") -> tuple[bytes, int]:
+        if voice_id.startswith("builtin:"):
+            _, engine, vid = voice_id.split(":", 2)
+            return await self._be(engine).synthesize(text, vid)
+
+        prof = self._profiles.get(voice_id)
+        if prof is None:
+            # Back-compat: treat an unknown id as a raw built-in preset voice.
+            return await self._be(BUILTIN_PRESET_ENGINE).synthesize(text, voice_id)
+
+        if prof.voice_type == "preset":
+            engine = prof.preset_engine or BUILTIN_PRESET_ENGINE
+            return await self._be(engine).synthesize(text, prof.preset_voice_id)
+
+        # cloned
+        be = self._be(prof.default_engine or DEFAULT_CLONE_ENGINE)
+        return await be.synthesize_profile(prof, text, instruct)
 
     async def clone(self, name: str, sample_path: str, ref_text: str = "") -> str:
-        return await self._backend.clone(name, sample_path, ref_text)
+        """Legacy CloneVoice: create a cloned profile with a single sample."""
+        pid = self._profiles.create(name, "cloned", default_engine=DEFAULT_CLONE_ENGINE)
+        self._profiles.add_sample(pid, sample_path, ref_text)
+        return pid
+
+    def invalidate_profile(self, profile_id: str) -> None:
+        """Drop any cached clone prompt for a profile (e.g. after samples change)."""
+        for be in self._backends.values():
+            inv = getattr(be, "invalidate_profile", None)
+            if inv:
+                inv(profile_id)

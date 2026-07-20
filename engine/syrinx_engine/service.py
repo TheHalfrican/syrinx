@@ -5,6 +5,7 @@ Keep ML logic out of here.
 """
 
 import asyncio
+import json
 import logging
 
 from dbus_next.service import ServiceInterface, method, signal, dbus_property
@@ -12,6 +13,7 @@ from dbus_next.constants import PropertyAccess
 
 from .tts import SpeechSynthesizer
 from .stt import Transcriber
+from .profiles import ProfileStore
 from . import audio
 
 log = logging.getLogger("syrinx.engine.service")
@@ -20,7 +22,8 @@ log = logging.getLogger("syrinx.engine.service")
 class EngineInterface(ServiceInterface):
     def __init__(self) -> None:
         super().__init__("sh.syrinx.Engine1")
-        self._tts = SpeechSynthesizer()
+        self._profiles = ProfileStore()
+        self._tts = SpeechSynthesizer(self._profiles)
         self._stt = Transcriber()
         self._model_loaded = False
         self._next_gen_id = 1
@@ -77,6 +80,54 @@ class EngineInterface(ServiceInterface):
     async def CloneVoice(self, name: "s", sample_path: "s", ref_text: "s") -> "s":  # noqa: F821
         # ref_text = transcript of the reference clip (needed by Qwen cloning).
         return await self._tts.clone(name, sample_path, ref_text)
+
+    # --- voice profiles (JSON payloads for the structured bits) ---------
+
+    @method()
+    async def CreateProfile(self, spec_json: "s") -> "s":  # noqa: F821
+        s = json.loads(spec_json)
+        return self._profiles.create(
+            s["name"],
+            s.get("voice_type", "cloned"),
+            language=s.get("language", "en"),
+            description=s.get("description", ""),
+            personality=s.get("personality", ""),
+            default_engine=s.get("default_engine", ""),
+            preset_engine=s.get("preset_engine", ""),
+            preset_voice_id=s.get("preset_voice_id", ""),
+        )
+
+    @method()
+    async def ListProfiles(self) -> "s":  # noqa: F821
+        return json.dumps([p.summary() for p in self._profiles.list()])
+
+    @method()
+    async def GetProfile(self, profile_id: "s") -> "s":  # noqa: F821
+        p = self._profiles.get(profile_id)
+        return json.dumps(p.full()) if p else ""
+
+    @method()
+    async def UpdateProfile(self, profile_id: "s", patch_json: "s") -> None:  # noqa: F821
+        self._profiles.update(profile_id, **json.loads(patch_json))
+
+    @method()
+    async def DeleteProfile(self, profile_id: "s") -> None:  # noqa: F821
+        self._profiles.delete(profile_id)
+        self._tts.invalidate_profile(profile_id)
+
+    @method()
+    async def AddSample(self, profile_id: "s", audio_path: "s", reference_text: "s") -> "s":  # noqa: F821
+        # Auto-transcribe when no transcript is supplied (whisper).
+        text = reference_text
+        if not text.strip():
+            text = await self._stt.transcribe(audio_path)
+        sample = self._profiles.add_sample(profile_id, audio_path, text)
+        self._tts.invalidate_profile(profile_id)  # rebuild clone prompt next synth
+        return json.dumps({"sample_id": sample.id, "reference_text": sample.reference_text})
+
+    @method()
+    async def DeleteSample(self, sample_id: "s") -> None:  # noqa: F821
+        self._profiles.delete_sample(sample_id)
 
     @method()
     def Cancel(self, gen_id: "u") -> None:  # noqa: F821
