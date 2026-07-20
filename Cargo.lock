@@ -5158,6 +5158,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-util",
+ "serde_json",
  "slint",
  "slint-build",
  "syrinx-shared",

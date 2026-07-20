@@ -27,6 +27,9 @@ models/
 .env
 *.local
 
+# Local dev notes (kept out of the public repo)
+HANDOFF.md
+
 # Editor / OS
 .idea/
 .vscode/

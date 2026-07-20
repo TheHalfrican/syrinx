@@ -1,0 +1,96 @@
+// Syrinx theme system — one global palette, five swappable skins.
+// Mirrors the design mockup's CSS custom properties. Set Theme.name to one of:
+//   "vista" (Aero) · "win95" · "ps5" (Astro) · "rice" · "tui"
+// (Aero's frosted-glass blur isn't native to Slint — approximated with
+// translucency + gradients.)
+
+export global Theme {
+    in-out property <string> name: "vista";
+    in-out property <bool> reduced-motion: false;
+
+    // --- desktop / window ---
+    out property <brush> desk:
+        name == "win95" ? #00807f
+      : name == "ps5"   ? @radial-gradient(circle, #1b2740 0%, #0b1120 55%, #04060c 100%)
+      : name == "rice"  ? @linear-gradient(140deg, #181825 0%, #1e1e2e 40%, #232338 70%, #2a2440 100%)
+      : name == "tui"   ? #000000
+      : @linear-gradient(160deg, #0e3a52 0%, #15644f 45%, #3f8f5b 75%, #8fbf6a 100%);
+
+    out property <brush> win-bg:
+        name == "win95" ? #c0c0c0
+      : name == "ps5"   ? @linear-gradient(180deg, #0f1522, #0a0e18)
+      : name == "rice"  ? #1e1e2e
+      : name == "tui"   ? #0b0f0b
+      : #c6dcec.with-alpha(0.72);
+
+    out property <color> win-brd:
+        name == "win95" ? #00000000
+      : name == "ps5"   ? #ffffff17
+      : name == "rice"  ? #89b4fa
+      : name == "tui"   ? #3e6b3e
+      : #ffffffa6;
+    out property <length> win-radius:
+        name == "win95" ? 0px : name == "ps5" ? 20px : name == "rice" ? 12px : name == "tui" ? 0px : 10px;
+
+    // --- title bar ---
+    out property <brush> tb-bg:
+        name == "win95" ? @linear-gradient(90deg, #000080, #1084d0)
+      : name == "ps5"   ? #0a0e1800
+      : name == "rice"  ? #181825
+      : name == "tui"   ? #0b0f0b
+      : @linear-gradient(180deg, #ffffff99, #ffffff22);
+    out property <color> tb-fg:
+        name == "win95" ? #ffffff : name == "vista" ? #10314a : name == "rice" ? #cdd6f4 : name == "tui" ? #a9d977 : #e9eef6;
+
+    // --- panels ---
+    out property <brush> side-bg:
+        name == "win95" ? #c0c0c0 : name == "ps5" ? #ffffff08 : name == "rice" ? #181825 : name == "tui" ? #0b0f0b : #ebf4fbbf;
+    out property <brush> pan-bg:
+        name == "win95" ? #c0c0c0 : name == "ps5" ? #00000000 : name == "rice" ? #1e1e2e : name == "tui" ? #0b0f0b : #f4f8fc;
+    out property <brush> card-bg:
+        name == "win95" ? #ffffff : name == "ps5" ? #ffffff0e : name == "rice" ? #26263a : name == "tui" ? #101610 : #ffffff;
+    out property <color> brd:
+        name == "win95" ? #808080 : name == "ps5" ? #ffffff1f : name == "rice" ? #363654 : name == "tui" ? #2c4a2c : #c8d6e2;
+    out property <length> rad:
+        name == "win95" ? 0px : name == "ps5" ? 12px : name == "rice" ? 9px : name == "tui" ? 0px : 6px;
+
+    // --- text ---
+    out property <color> fg:
+        name == "win95" ? #000000 : name == "ps5" ? #eef2f8 : name == "rice" ? #cdd6f4 : name == "tui" ? #a9d977 : #16324a;
+    out property <color> dim:
+        name == "win95" ? #444444 : name == "ps5" ? #8b95a7 : name == "rice" ? #8a8fad : name == "tui" ? #5d7f52 : #5f7a90;
+
+    // --- accent ---
+    out property <color> acc:
+        name == "win95" ? #000080 : name == "ps5" ? #2e6fe3 : name == "rice" ? #cba6f7 : name == "tui" ? #e0c56e : #1d84d6;
+    out property <color> acc-soft:
+        name == "win95" ? #d5d5e8 : name == "ps5" ? #2e6fe338 : name == "rice" ? #cba6f729 : name == "tui" ? #e0c56e1f : #1d84d624;
+    out property <color> acc-fg:
+        name == "win95" ? #ffffff : name == "rice" ? #1e1e2e : name == "tui" ? #0b0f0b : #ffffff;
+
+    // --- buttons ---
+    out property <brush> btn-bg:
+        name == "win95" ? #c0c0c0 : name == "ps5" ? #ffffff14 : name == "rice" ? #2c2c44 : name == "tui" ? #101610
+      : @linear-gradient(180deg, #fefefe, #e7edf3 45%, #d5dfe9 46%, #e9f1f8);
+    out property <color> btn-fg: root.fg;
+    out property <color> btn-brd:
+        name == "win95" ? #808080 : name == "ps5" ? #ffffff29 : name == "rice" ? #3d3d5c : name == "tui" ? #3e6b3e : #8ba7bd;
+
+    out property <brush> gen-bg:
+        name == "win95" ? #c0c0c0 : name == "ps5" ? #eef2f8 : name == "rice" ? @linear-gradient(90deg, #cba6f7, #89b4fa) : name == "tui" ? #a9d977
+      : @linear-gradient(180deg, #8fd3ff, #2f9ae0 45%, #1379bd 46%, #3fa4e8);
+    out property <color> gen-fg:
+        name == "win95" ? #000000 : name == "ps5" ? #0a0e18 : name == "rice" ? #11111b : name == "tui" ? #0b0f0b : #ffffff;
+
+    // --- misc ---
+    out property <color> chip-bg:
+        name == "win95" ? #dfdfdf : name == "ps5" ? #ffffff1a : name == "rice" ? #313148 : name == "tui" ? #1a241a : #e4eef7;
+    out property <color> wave:
+        name == "win95" ? #000080 : name == "ps5" ? #7fa8f2 : name == "rice" ? #cba6f7 : name == "tui" ? #a9d977 : #1d84d6;
+    out property <color> wave-dim:
+        name == "win95" ? #9a9a9a : name == "ps5" ? #ffffff2e : name == "rice" ? #45455f : name == "tui" ? #2c4a2c : #b9cddd;
+
+    out property <string> font:
+        name == "win95" ? "Tahoma" : name == "tui" ? "JetBrains Mono" : "";  // "" = system default
+    out property <string> mono: "JetBrains Mono";
+}
