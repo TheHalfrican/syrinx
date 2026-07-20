@@ -66,8 +66,8 @@ class EngineInterface(ServiceInterface):
         return gen_id
 
     @method()
-    async def Transcribe(self, pcm: "ay") -> "s":  # noqa: F821
-        return await self._stt.transcribe(bytes(pcm))
+    async def Transcribe(self, audio_path: "s") -> "s":  # noqa: F821
+        return await self._stt.transcribe(audio_path)
 
     @method()
     async def ListVoices(self) -> "a(ss)":  # noqa: F821

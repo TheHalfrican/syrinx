@@ -32,8 +32,8 @@ pub trait Engine {
     /// Synthesize `text` in `voice_id`; returns a generation id.
     fn speak(&self, text: &str, voice_id: &str) -> zbus::Result<u32>;
 
-    /// Transcribe raw PCM (dictation). Returns recognized text.
-    fn transcribe(&self, pcm: &[u8]) -> zbus::Result<String>;
+    /// Transcribe an audio file (dictation). Returns recognized text.
+    fn transcribe(&self, audio_path: &str) -> zbus::Result<String>;
 
     /// List available voices as (id, display_name) pairs.
     fn list_voices(&self) -> zbus::Result<Vec<(String, String)>>;

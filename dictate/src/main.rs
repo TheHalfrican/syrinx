@@ -1,67 +1,123 @@
-//! syrinx-dictate — the dictation pill.
+//! syrinx-dictate — global dictation for Hyprland.
 //!
-//! Invoked by a Hyprland keybind: `bind = SUPER, D, exec, syrinx-dictate toggle`.
+//!   bind = SUPER, D, exec, syrinx-dictate toggle
 //!
-//! Flow:
-//!   1. `toggle` → map a wlr-layer-shell overlay ("the pill") and start
-//!      PipeWire mic capture.
-//!   2. On the next `toggle` (or VAD silence) → stop capture, send PCM to the
-//!      engine's `Transcribe` over D-Bus.
-//!   3. Put the result on the clipboard (`wl-copy`) and paste it into the
-//!      focused window (`ydotool key ctrl+v`).
-//!   4. Fade the pill out.
+//! Press once to start recording, again to stop → transcribe (engine's
+//! whisper over D-Bus) → paste into the focused window. State lives in a small
+//! file under $XDG_RUNTIME_DIR, so the two key-presses are independent runs.
 //!
-//! Everything here is Hyprland-native: layer-shell for the surface, ydotool
-//! (uinput) for injection, PipeWire for audio. No app-level global keytap.
+//! Native-Hyprland stack: pw-record (PipeWire capture), the engine's
+//! faster-whisper for STT, and wtype (virtual-keyboard protocol) for injection.
+//! The wlr-layer-shell visual pill is the next increment — TODO(syrinx).
 
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
-fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
+use anyhow::{Context, Result};
+use syrinx_shared::EngineProxy;
 
-    let cmd = std::env::args().nth(1).unwrap_or_else(|| "toggle".into());
-    match cmd.as_str() {
+fn runtime_dir() -> PathBuf {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+}
+fn state_path() -> PathBuf {
+    runtime_dir().join("syrinx-dictate.state")
+}
+fn wav_path() -> PathBuf {
+    runtime_dir().join("syrinx-dictate.wav")
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_env_filter("info").init();
+    match std::env::args().nth(1).as_deref().unwrap_or("toggle") {
         "toggle" => toggle(),
+        "start" => start_recording(),
+        "stop" => stop_and_transcribe(),
         other => {
-            eprintln!("syrinx-dictate: unknown command '{other}' (expected: toggle)");
+            eprintln!("syrinx-dictate: unknown command '{other}' (toggle|start|stop)");
             std::process::exit(2);
         }
     }
 }
 
-fn toggle() -> anyhow::Result<()> {
-    tracing::info!("toggle: (stub) show/hide the pill + start/stop capture");
+fn toggle() -> Result<()> {
+    if state_path().exists() {
+        stop_and_transcribe()
+    } else {
+        start_recording()
+    }
+}
 
-    // TODO(syrinx): single-instance guard (a lock/socket) so a second
-    // invocation stops the first's recording instead of spawning a new pill.
+fn start_recording() -> Result<()> {
+    let wav = wav_path();
+    let _ = fs::remove_file(&wav);
 
-    // TODO(syrinx): map the wlr-layer-shell overlay here.
-    //   With gtk4-layer-shell: create a GTK window, then
-    //     gtk4_layer_shell::init_for_window(&win);
-    //     set_layer(Layer::Overlay);
-    //     set_anchor(Edge::Bottom, true);
-    //   With smithay-client-toolkit: bind zwlr_layer_shell_v1 directly.
+    // pw-record captures until it receives SIGINT; 16 kHz mono is what whisper wants.
+    let child = Command::new("pw-record")
+        .args(["--rate", "16000", "--channels", "1"])
+        .arg(&wav)
+        .spawn()
+        .context("failed to spawn pw-record (is pipewire installed?)")?;
 
-    // TODO(syrinx): capture mic via PipeWire into a PCM buffer.
-
-    // TODO(syrinx): let text = EngineProxy::transcribe(&pcm).await?;
-    let text = "(transcription goes here)";
-
-    paste(text)?;
+    fs::write(state_path(), format!("{}\n{}", child.id(), wav.display()))?;
+    tracing::info!("● recording — run `syrinx-dictate toggle` again to stop");
+    // TODO(syrinx): map the wlr-layer-shell pill here.
     Ok(())
 }
 
-/// Inject text into the focused window the Wayland-native way:
-/// set the clipboard, then synthesize Ctrl+V via ydotool (uinput).
-fn paste(text: &str) -> anyhow::Result<()> {
-    // Requires `wl-clipboard` and a running `ydotoold`.
-    let ok = Command::new("wl-copy").arg(text).status()?.success();
-    if !ok {
-        anyhow::bail!("wl-copy failed (is wl-clipboard installed?)");
+fn stop_and_transcribe() -> Result<()> {
+    let state = fs::read_to_string(state_path()).context("no recording in progress")?;
+    let mut lines = state.lines();
+    let pid: i32 = lines
+        .next()
+        .unwrap_or("")
+        .trim()
+        .parse()
+        .context("corrupt state file (pid)")?;
+    let wav = lines.next().unwrap_or("").trim().to_string();
+    let _ = fs::remove_file(state_path());
+
+    // SIGINT lets pw-record flush and finalize the WAV header cleanly.
+    let _ = Command::new("kill").args(["-INT", &pid.to_string()]).status();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    let text = transcribe(&wav)?;
+    let _ = fs::remove_file(&wav);
+    let text = text.trim();
+    if text.is_empty() {
+        tracing::info!("(no speech detected)");
+        return Ok(());
     }
-    // 29 = Left Ctrl, 47 = V (Linux input event codes). ydotool: <code>:<press>
-    Command::new("ydotool")
-        .args(["key", "29:1", "47:1", "47:0", "29:0"])
-        .status()?;
+    tracing::info!("transcribed: {text}");
+    paste(text)?;
+    // TODO(syrinx): hide the pill.
+    Ok(())
+}
+
+/// Ask the engine to transcribe the WAV over D-Bus.
+fn transcribe(wav: &str) -> Result<String> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let conn = zbus::Connection::session().await?;
+        let proxy = EngineProxy::new(&conn).await?;
+        Ok::<String, anyhow::Error>(proxy.transcribe(wav).await?)
+    })
+}
+
+/// Inject text into the focused window. Prefer wtype (virtual-keyboard protocol,
+/// works natively on wlroots/Hyprland); fall back to the clipboard.
+fn paste(text: &str) -> Result<()> {
+    if Command::new("wtype")
+        .arg(text)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let _ = Command::new("wl-copy").arg(text).status();
+    tracing::warn!("wtype not found — text copied to clipboard. Install `wtype` to auto-paste.");
     Ok(())
 }
