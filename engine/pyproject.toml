@@ -7,10 +7,12 @@ dependencies = [
     "dbus-next>=0.2.3",   # async D-Bus service
     "numpy",
     "sounddevice",        # PipeWire capture/playback
-    # On Arch, prefer the system packages: python-pytorch-cuda / -rocm / -opt.
-    # Listed here so a plain `pip install -e .` works for dev.
-    "torch",
-    "transformers",
+    "soundfile",          # audio I/O
+    # TTS: Kokoro-82M (pulls torch + misaki G2P). CPU-realtime; on the 4090
+    # desktop torch auto-uses CUDA. Heavier cloning engines (Qwen3-TTS/LuxTTS)
+    # will be added later as optional extras.
+    "kokoro>=0.9.2",
+    "misaki[en]",         # English G2P for Kokoro
 ]
 
 [project.scripts]
