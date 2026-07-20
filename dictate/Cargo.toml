@@ -8,6 +8,10 @@ license.workspace = true
 name = "syrinx-dictate"
 path = "src/main.rs"
 
+[[bin]]
+name = "syrinx-dictate-pill"
+path = "src/pill.rs"
+
 [dependencies]
 syrinx-shared.workspace = true
 zbus.workspace = true
@@ -15,7 +19,7 @@ tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-# TODO(syrinx): add for the real implementation:
-#   gtk4-layer-shell + gtk4   (the layer-shell overlay), OR
-#   smithay-client-toolkit    (raw wlr-layer-shell, no GTK)
-#   pipewire                  (mic capture)
+# The wlr-layer-shell overlay ("the pill"). Only the syrinx-dictate-pill bin
+# uses these; the toggle bin stays lean.
+gtk4 = "0.9"
+gtk4-layer-shell = "0.5"

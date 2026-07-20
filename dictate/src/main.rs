@@ -12,7 +12,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use syrinx_shared::EngineProxy;
@@ -55,32 +55,68 @@ fn start_recording() -> Result<()> {
     let _ = fs::remove_file(&wav);
 
     // pw-record captures until it receives SIGINT; 16 kHz mono is what whisper wants.
-    let child = Command::new("pw-record")
+    let rec = Command::new("pw-record")
         .args(["--rate", "16000", "--channels", "1"])
         .arg(&wav)
+        // Detach stdio so `start` returns cleanly (a caller piping our output
+        // must not block waiting on the long-lived recorder/pill).
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .context("failed to spawn pw-record (is pipewire installed?)")?;
 
-    fs::write(state_path(), format!("{}\n{}", child.id(), wav.display()))?;
+    // Show the layer-shell pill (best-effort — dictation works without it).
+    let pill_pid = spawn_pill();
+
+    fs::write(
+        state_path(),
+        format!("{}\n{}\n{}", rec.id(), pill_pid, wav.display()),
+    )?;
     tracing::info!("● recording — run `syrinx-dictate toggle` again to stop");
-    // TODO(syrinx): map the wlr-layer-shell pill here.
     Ok(())
+}
+
+/// Spawn the pill overlay binary (sibling of this executable). Returns its PID,
+/// or 0 if it couldn't start (dictation continues regardless).
+fn spawn_pill() -> u32 {
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("syrinx-dictate-pill")));
+    match path.map(|p| {
+        Command::new(p)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    }) {
+        Some(Ok(child)) => child.id(),
+        Some(Err(e)) => {
+            tracing::warn!("pill overlay unavailable: {e}");
+            0
+        }
+        None => 0,
+    }
 }
 
 fn stop_and_transcribe() -> Result<()> {
     let state = fs::read_to_string(state_path()).context("no recording in progress")?;
     let mut lines = state.lines();
-    let pid: i32 = lines
+    let rec_pid: i32 = lines
         .next()
         .unwrap_or("")
         .trim()
         .parse()
-        .context("corrupt state file (pid)")?;
+        .context("corrupt state file (rec pid)")?;
+    let pill_pid: i32 = lines.next().unwrap_or("0").trim().parse().unwrap_or(0);
     let wav = lines.next().unwrap_or("").trim().to_string();
     let _ = fs::remove_file(state_path());
 
-    // SIGINT lets pw-record flush and finalize the WAV header cleanly.
-    let _ = Command::new("kill").args(["-INT", &pid.to_string()]).status();
+    // Close the pill overlay, then SIGINT pw-record so it finalizes the WAV.
+    if pill_pid > 0 {
+        let _ = Command::new("kill").arg(pill_pid.to_string()).status();
+    }
+    let _ = Command::new("kill").args(["-INT", &rec_pid.to_string()]).status();
     std::thread::sleep(std::time::Duration::from_millis(400));
 
     let text = transcribe(&wav)?;
