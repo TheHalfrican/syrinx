@@ -55,4 +55,10 @@ pub trait Engine {
 
     #[zbus(signal)]
     fn audio_level(&self, gen_id: u32, rms: f64) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn speak_started(&self, gen_id: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn speak_ended(&self, gen_id: u32) -> zbus::Result<()>;
 }

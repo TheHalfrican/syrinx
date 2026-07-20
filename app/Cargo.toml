@@ -8,6 +8,7 @@ license.workspace = true
 slint = "1.8"
 syrinx-shared.workspace = true
 zbus.workspace = true
+futures-util = "0.3"
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

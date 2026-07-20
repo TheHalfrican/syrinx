@@ -85,7 +85,9 @@ export component AppWindow inherits Window {
 
                 // Live level meter (visible while speaking)
                 for i in 5: LevelBar {
-                    level: root.speaking ? root.level * (0.6 + 0.4 * sin(i * 1.0)) : 0.0;
+                    // Give each bar a slightly different scale so the meter reads
+                    // as a little cluster rather than 5 identical bars.
+                    level: root.speaking ? root.level * (0.6 + 0.4 * sin(i * 60deg)) : 0.0;
                 }
 
                 Button {
