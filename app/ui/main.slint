@@ -1,0 +1,105 @@
+// Syrinx — main window.
+//
+// Slint's declarative UI: GPU-rendered, native Wayland, no webview.
+// This is a starting point — a dark, minimal voice studio shell.
+
+import { Button, ComboBox, TextEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+// A tiny animated bar that pulses with the current audio level.
+component LevelBar inherits Rectangle {
+    in property <float> level; // 0.0 .. 1.0
+    width: 4px;
+    border-radius: 2px;
+    background: #7c5cff;
+    height: 6px + (self.level * 40px);
+    animate height { duration: 80ms; easing: ease-out; }
+}
+
+export component AppWindow inherits Window {
+    title: "Syrinx";
+    preferred-width: 720px;
+    preferred-height: 480px;
+    background: #14131a;
+
+    // --- State exposed to Rust ------------------------------------------
+    in-out property <string> text: "Type something for Syrinx to say…";
+    in property <[string]> voices: ["Default"];
+    in-out property <string> selected-voice: "Default";
+    in property <bool> speaking: false;
+    in property <float> level: 0.0;      // live RMS from the engine
+    in property <string> backend: "cpu"; // cuda | rocm | cpu
+
+    // --- Events Rust listens for ----------------------------------------
+    callback speak(string, string); // (text, voice_id)
+    callback stop();
+
+    VerticalBox {
+        padding: 24px;
+        spacing: 18px;
+
+        // Header
+        HorizontalBox {
+            alignment: start;
+            spacing: 10px;
+            Text {
+                text: "syrinx";
+                font-size: 26px;
+                font-weight: 700;
+                color: #efeaff;
+            }
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                y: parent.height / 2 - 4px;
+                background: root.backend == "cpu" ? #6b6b78 : #4ade80;
+            }
+            Text {
+                text: root.backend;
+                font-size: 12px;
+                color: #8a8698;
+                vertical-alignment: center;
+            }
+        }
+
+        // Text to speak
+        TextEdit {
+            text <=> root.text;
+            font-size: 15px;
+            wrap: word-wrap;
+            min-height: 160px;
+        }
+
+        // Controls
+        HorizontalBox {
+            spacing: 12px;
+            alignment: space-between;
+
+            ComboBox {
+                model: root.voices;
+                current-value <=> root.selected-voice;
+                min-width: 200px;
+            }
+
+            HorizontalBox {
+                spacing: 6px;
+                alignment: end;
+
+                // Live level meter (visible while speaking)
+                for i in 5: LevelBar {
+                    level: root.speaking ? root.level * (0.6 + 0.4 * sin(i * 1.0)) : 0.0;
+                }
+
+                Button {
+                    text: root.speaking ? "Stop" : "Speak";
+                    primary: true;
+                    clicked => {
+                        if (root.speaking) {
+                            root.stop();
+                        } else {
+                            root.speak(root.text, root.selected-voice);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

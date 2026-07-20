@@ -1,0 +1,36 @@
+# Rust
+/target
+**/*.rs.bk
+# NOTE: Cargo.lock IS committed — this is a binary/application workspace.
+
+# Python engine
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Model weights / caches (never commit these)
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.onnx
+*.ckpt
+models/
+
+# Secrets / local config
+.env
+*.local
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

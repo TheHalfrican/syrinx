@@ -1,0 +1,54 @@
+# Maintainer: TheHalfrican
+pkgname=syrinx
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native Wayland voice studio — TTS, voice cloning, and dictation for Hyprland"
+arch=('x86_64')
+url="https://github.com/TheHalfrican/syrinx"
+license=('MIT')
+# Runtime: the engine + native Wayland tooling. Swap pytorch variant to taste.
+depends=(
+  'python'
+  'python-pytorch-opt-cuda'   # or python-pytorch-opt-rocm / python-pytorch-opt
+  'python-numpy'
+  'python-sounddevice'
+  'whisper.cpp'
+  'ydotool'
+  'wl-clipboard'
+  'pipewire'
+)
+makedepends=('rust' 'cargo' 'python-build' 'python-installer' 'python-setuptools')
+# python-dbus-next is usually AUR; declare it however you vendor it.
+optdepends=('python-dbus-next: D-Bus service (required at runtime)')
+source=()  # local build for now; add a git source/tag when published
+
+build() {
+  cd "$srcdir/.."
+  cargo build --release --workspace
+  cd engine
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$srcdir/.."
+
+  # Rust binaries
+  install -Dm755 target/release/syrinx-app     "$pkgdir/usr/bin/syrinx"
+  install -Dm755 target/release/syrinx-dictate "$pkgdir/usr/bin/syrinx-dictate"
+
+  # Python engine wheel
+  cd engine
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  cd ..
+
+  # systemd --user unit for the hot engine
+  install -Dm644 packaging/syrinx-engine.service \
+    "$pkgdir/usr/lib/systemd/user/syrinx-engine.service"
+
+  install -Dm644 packaging/hyprland.conf \
+    "$pkgdir/usr/share/doc/syrinx/hyprland.conf"
+}
+
+# After install:
+#   systemctl --user enable --now syrinx-engine.service
+#   add packaging/hyprland.conf's bind to ~/.config/hypr/hyprland.conf

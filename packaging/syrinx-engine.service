@@ -1,0 +1,22 @@
+# systemd --user unit for the Syrinx engine.
+#
+#   systemctl --user enable --now syrinx-engine.service
+#
+# Runs the ML service on the session bus, hot and ready, so the app and the
+# dictation pill attach instantly — no per-launch model load.
+
+[Unit]
+Description=Syrinx voice engine (TTS/STT on D-Bus)
+After=pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=sh.syrinx.Engine
+ExecStart=/usr/bin/syrinx-engine
+Restart=on-failure
+# Keep the (large) model in RAM across app restarts; that's the whole point.
+# Nice=-5
+
+[Install]
+WantedBy=graphical-session.target

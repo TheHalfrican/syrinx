@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["app", "dictate", "shared"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/TheHalfrican/syrinx"
+
+[workspace.dependencies]
+syrinx-shared = { path = "shared" }
+# D-Bus (async, pure-Rust)
+zbus = "4"
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

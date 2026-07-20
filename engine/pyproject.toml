@@ -1,0 +1,21 @@
+[project]
+name = "syrinx-engine"
+version = "0.1.0"
+description = "Syrinx ML engine — Qwen3-TTS + whisper.cpp, exposed on D-Bus"
+requires-python = ">=3.11"
+dependencies = [
+    "dbus-next>=0.2.3",   # async D-Bus service
+    "numpy",
+    "sounddevice",        # PipeWire capture/playback
+    # On Arch, prefer the system packages: python-pytorch-cuda / -rocm / -opt.
+    # Listed here so a plain `pip install -e .` works for dev.
+    "torch",
+    "transformers",
+]
+
+[project.scripts]
+syrinx-engine = "syrinx_engine.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

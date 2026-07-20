@@ -1,0 +1,21 @@
+[package]
+name = "syrinx-dictate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "syrinx-dictate"
+path = "src/main.rs"
+
+[dependencies]
+syrinx-shared.workspace = true
+zbus.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# TODO(syrinx): add for the real implementation:
+#   gtk4-layer-shell + gtk4   (the layer-shell overlay), OR
+#   smithay-client-toolkit    (raw wlr-layer-shell, no GTK)
+#   pipewire                  (mic capture)
