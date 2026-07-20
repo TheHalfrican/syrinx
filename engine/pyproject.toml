@@ -15,6 +15,14 @@ dependencies = [
     "misaki[en]",         # English G2P for Kokoro
 ]
 
+[project.optional-dependencies]
+# The beefy zero-shot voice-cloning engine — install on GPU boxes (the 4090):
+#   pip install -e 'engine[qwen]'
+qwen = [
+    "qwen-tts>=0.0.5",
+    "transformers>=4.36.0",
+]
+
 [project.scripts]
 syrinx-engine = "syrinx_engine.__main__:main"
 

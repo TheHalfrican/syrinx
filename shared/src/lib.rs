@@ -38,8 +38,9 @@ pub trait Engine {
     /// List available voices as (id, display_name) pairs.
     fn list_voices(&self) -> zbus::Result<Vec<(String, String)>>;
 
-    /// Clone a voice from a sample file; returns the new profile id.
-    fn clone_voice(&self, name: &str, sample_path: &str) -> zbus::Result<String>;
+    /// Clone a voice from a sample file (+ its transcript); returns the new
+    /// profile id. `ref_text` is required by the Qwen cloning backend.
+    fn clone_voice(&self, name: &str, sample_path: &str, ref_text: &str) -> zbus::Result<String>;
 
     /// Cancel an in-flight generation.
     fn cancel(&self, gen_id: u32) -> zbus::Result<()>;

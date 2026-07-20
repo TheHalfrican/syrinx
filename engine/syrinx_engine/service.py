@@ -74,8 +74,9 @@ class EngineInterface(ServiceInterface):
         return [[v.id, v.name] for v in await self._tts.list_voices()]
 
     @method()
-    async def CloneVoice(self, name: "s", sample_path: "s") -> "s":  # noqa: F821
-        return await self._tts.clone(name, sample_path)
+    async def CloneVoice(self, name: "s", sample_path: "s", ref_text: "s") -> "s":  # noqa: F821
+        # ref_text = transcript of the reference clip (needed by Qwen cloning).
+        return await self._tts.clone(name, sample_path, ref_text)
 
     @method()
     def Cancel(self, gen_id: "u") -> None:  # noqa: F821

@@ -1,0 +1,52 @@
+"""TTS backends for Syrinx.
+
+Two engines behind one interface, selected by ``SYRINX_TTS_ENGINE``:
+
+- **kokoro** (default) — Kokoro-82M preset voices. Tiny, CPU-realtime. Great
+  everywhere, including this iGPU box.
+- **qwen** — Qwen3-TTS zero-shot voice cloning. Beefy (~3.5 GB), wants a GPU.
+  This is the one that lights up on the RTX 4090.
+
+Each backend implements the same small async interface:
+    .device -> str                       # "cuda" | "rocm" | "cpu"
+    .supports_cloning -> bool
+    async load()
+    async list_voices() -> list[VoiceInfo]
+    async synthesize(text, voice_id) -> (pcm_float32_bytes, sample_rate)
+    async clone(name, sample_path, ref_text) -> voice_id
+"""
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass
+class VoiceInfo:
+    id: str
+    name: str
+
+
+def detect_device() -> str:
+    """Best available torch device: cuda / rocm / cpu."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "rocm" if getattr(torch.version, "hip", None) else "cuda"
+    except Exception:  # noqa: BLE001
+        pass
+    return "cpu"
+
+
+def make_backend(name: str | None = None):
+    """Instantiate the configured TTS backend (lazy imports keep deps optional)."""
+    name = (name or os.environ.get("SYRINX_TTS_ENGINE", "kokoro")).lower()
+    if name == "kokoro":
+        from .kokoro import KokoroBackend
+
+        return KokoroBackend()
+    if name == "qwen":
+        from .qwen import QwenBackend
+
+        return QwenBackend()
+    raise ValueError(f"Unknown SYRINX_TTS_ENGINE={name!r} (expected: kokoro | qwen)")
