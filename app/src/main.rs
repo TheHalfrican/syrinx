@@ -34,6 +34,9 @@ enum Cmd {
     CvCancel,
     Compose { voice_id: String, prompt: String },
     Rewrite { voice_id: String, text: String },
+    DownloadModel { id: String },
+    DeleteModel { id: String },
+    ActivateModel { id: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -167,6 +170,18 @@ fn main() -> anyhow::Result<()> {
             ui.set_synthesizing(true);
             let _ = tx.send(Cmd::Regenerate { id: id.to_string() });
         });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_download_model(move |id| { let _ = tx.send(Cmd::DownloadModel { id: id.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_delete_model(move |id| { let _ = tx.send(Cmd::DeleteModel { id: id.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_activate_model(move |id| { let _ = tx.send(Cmd::ActivateModel { id: id.to_string() }); });
     }
     {
         let tx = tx.clone();
@@ -460,6 +475,93 @@ fn build_history(json: &str) -> Vec<HistItem> {
         .collect()
 }
 
+fn size_label(mb: i64) -> String {
+    if mb >= 1024 {
+        format!("{:.1} GB", mb as f64 / 1024.0)
+    } else {
+        format!("{mb} MB")
+    }
+}
+
+/// Build the three category model lists from the engine's ListModels JSON.
+fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>) {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+    let (mut voice, mut stt, mut llm) = (Vec::new(), Vec::new(), Vec::new());
+    for m in arr.iter() {
+        let s = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let b = |k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+        let mb = m.get("size_mb").and_then(|v| v.as_i64()).unwrap_or(0);
+        let item = ModelItem {
+            id: s("id").into(),
+            display: s("display").into(),
+            size_label: size_label(mb).into(),
+            description: s("description").into(),
+            downloaded: b("downloaded"),
+            downloading: b("downloading"),
+            active: b("active"),
+            supported: b("supported"),
+            warning: s("warning").into(),
+            progress: 0.0,
+        };
+        match m.get("category").and_then(|v| v.as_str()).unwrap_or("") {
+            "voice" => voice.push(item),
+            "stt" => stt.push(item),
+            "llm" => llm.push(item),
+            _ => {}
+        }
+    }
+    (voice, stt, llm)
+}
+
+/// One-line hardware summary for the Models header.
+fn hardware_line(json: &str) -> String {
+    let h: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    let cores = h.get("cores").and_then(|v| v.as_i64()).unwrap_or(0);
+    let ram = h.get("ram_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let gpu = h.get("gpu").and_then(|v| v.as_bool()).unwrap_or(false);
+    let name = h.get("gpu_name").and_then(|v| v.as_str()).unwrap_or("");
+    let gpu_part = if gpu {
+        if name.is_empty() { "GPU".to_string() } else { name.to_string() }
+    } else {
+        "no GPU".to_string()
+    };
+    format!("{cores} cores · {ram:.1} GB RAM · {gpu_part}")
+}
+
+/// Re-fetch the catalog + hardware and push into the UI.
+async fn refresh_models(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) {
+    let models_json = proxy.list_models().await.unwrap_or_else(|_| "[]".into());
+    let hw_json = proxy.hardware().await.unwrap_or_default();
+    let (voice, stt, llm) = build_models(&models_json);
+    let hwline = hardware_line(&hw_json);
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_voice_models(ModelRc::from(Rc::new(VecModel::from(voice))));
+        ui.set_stt_models(ModelRc::from(Rc::new(VecModel::from(stt))));
+        ui.set_llm_models(ModelRc::from(Rc::new(VecModel::from(llm))));
+        ui.set_hardware_line(hwline.into());
+    })
+    .ok();
+}
+
+/// Update a single model row's download progress in place (no refetch).
+fn set_model_progress(ui: &slint::Weak<AppWindow>, id: String, pct: f32, downloading: bool) {
+    ui.upgrade_in_event_loop(move |ui| {
+        for model in [ui.get_voice_models(), ui.get_stt_models(), ui.get_llm_models()] {
+            for i in 0..model.row_count() {
+                if let Some(mut it) = model.row_data(i) {
+                    if it.id.as_str() == id {
+                        it.progress = pct;
+                        it.downloading = downloading;
+                        model.set_row_data(i, it);
+                        return;
+                    }
+                }
+            }
+        }
+    })
+    .ok();
+}
+
 /// Replace the history model's contents in place (keeps the shared VecModel).
 fn set_history_model(ui: &AppWindow, items: Vec<HistItem>) {
     if let Some(vm) = ui.get_history().as_any().downcast_ref::<VecModel<HistItem>>() {
@@ -501,7 +603,9 @@ async fn worker(
     let mut pinfo = proxy.receive_playback_info().await?;
     let mut pprog = proxy.receive_playback_progress().await?;
     let mut llm_res = proxy.receive_llm_result().await?;
+    let mut mprog = proxy.receive_model_progress().await?;
     let mut pending_llm: u32 = 0;
+    refresh_models(&ui, &proxy).await;
     let mut current_gen: u32 = 0;
     let mut player_dur: f64 = 0.0;
     let mut current_play_gen: u32 = 0;
@@ -542,6 +646,15 @@ async fn worker(
                         ui.set_player_paused(false);
                         ui.set_synthesizing(false);
                     }).ok();
+                }
+            }
+            Some(sig) = mprog.next() => {
+                if let Ok(a) = sig.args() {
+                    let id = a.model_id.to_string();
+                    match a.status.as_str() {
+                        "downloading" => set_model_progress(&ui, id, a.pct as f32, true),
+                        _ => refresh_models(&ui, &proxy).await, // done / error
+                    }
                 }
             }
             Some(sig) = llm_res.next() => {
@@ -780,6 +893,20 @@ async fn worker(
                             }
                         }
                     }
+                }
+                Some(Cmd::DownloadModel { id }) => {
+                    match proxy.download_model(&id).await {
+                        Ok(true) => set_model_progress(&ui, id, 0.0, true),
+                        _ => tracing::error!("download_model failed: {id}"),
+                    }
+                }
+                Some(Cmd::DeleteModel { id }) => {
+                    proxy.delete_model(&id).await.ok();
+                    refresh_models(&ui, &proxy).await;
+                }
+                Some(Cmd::ActivateModel { id }) => {
+                    proxy.set_active_model(&id).await.ok();
+                    refresh_models(&ui, &proxy).await;
                 }
                 Some(Cmd::Compose { voice_id, prompt }) => {
                     match proxy.compose_profile(&voice_id, &prompt).await {

@@ -4,6 +4,11 @@ import { ScrollView } from "std-widgets.slint";
 
 export struct VoiceItem { id: string, name: string, desc: string, lang: string, kind: string, has-personality: bool }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
+export struct ModelItem {
+    id: string, display: string, size-label: string, description: string,
+    downloaded: bool, downloading: bool, active: bool, supported: bool,
+    warning: string, progress: float,
+}
 
 // --- Win95 3D bevel overlay (transparent center; draws a doubled 2px edge) ---
 // raised (default) = light top/left, dark bottom/right; sunken flips it (fields, pressed).
@@ -285,6 +290,64 @@ component LabeledInput inherits VerticalLayout {
     }
 }
 
+// --- a model catalog row (Models tab) ---
+component ModelRow inherits Rectangle {
+    in property <ModelItem> m;
+    callback download();
+    callback del();
+    callback activate();
+    height: 64px;
+    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
+    background: Theme.card-bg;
+    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 12px; spacing: 12px;
+        Rectangle {
+            width: 10px; height: 10px; y: parent.height / 2 - 5px; border-radius: 5px;
+            background: m.active ? Theme.acc : (m.downloaded ? #3ca35a : (m.downloading ? Theme.wave : Theme.brd));
+        }
+        VerticalLayout {
+            alignment: center; spacing: 2px; horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: m.display; font-size: 13px; font-weight: 700; color: Theme.fg; vertical-alignment: center; }
+                Text { text: m.size-label; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
+                if m.active : Rectangle {
+                    background: Theme.acc; border-radius: 8px;
+                    HorizontalLayout { padding-left: 6px; padding-right: 6px;
+                        Text { text: "ACTIVE"; font-size: 8.5px; font-weight: 700; color: Theme.acc-fg; vertical-alignment: center; } }
+                }
+                if !m.supported : Rectangle {
+                    background: Theme.chip-bg; border-radius: 8px;
+                    HorizontalLayout { padding-left: 6px; padding-right: 6px;
+                        Text { text: "engine soon"; font-size: 8.5px; color: Theme.dim; vertical-alignment: center; } }
+                }
+                Rectangle {}
+            }
+            Text { text: m.description; font-size: 10.5px; color: Theme.dim; overflow: elide; }
+            if m.warning != "" : Text { text: "⚠ " + m.warning; font-size: 9.5px; color: #d9922b; overflow: elide; }
+        }
+        Rectangle {
+            width: 156px;
+            if m.downloading : VerticalLayout {
+                alignment: center; spacing: 5px;
+                Text { text: "downloading…"; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; horizontal-alignment: center; }
+                Rectangle {
+                    height: 6px; border-radius: 3px; background: Theme.chip-bg;
+                    Rectangle { x: 0; width: parent.width * m.progress; height: 100%; border-radius: 3px; background: Theme.gen-bg; }
+                }
+            }
+            if !m.downloading : HorizontalLayout {
+                alignment: end; spacing: 6px;
+                if m.downloaded && m.supported && !m.active : TBtn { label: "Use"; clicked => { root.activate(); } }
+                if m.downloaded : TBtn { label: "Delete"; clicked => { root.del(); } }
+                if !m.downloaded && m.supported : TBtn { label: "Download"; generate: true; clicked => { root.download(); } }
+                if !m.downloaded && !m.supported : Text { text: "no backend yet"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Syrinx";
     preferred-width: 1180px;
@@ -305,6 +368,11 @@ export component AppWindow inherits Window {
     in property <string> backend: "cpu";
     in property <bool> selected-has-personality;
     in property <bool> llm-busy;
+    // --- models tab ---
+    in property <[ModelItem]> voice-models;
+    in property <[ModelItem]> stt-models;
+    in property <[ModelItem]> llm-models;
+    in property <string> hardware-line;
     // --- player (full-clip waveform + scrub) ---
     in property <bool> player-active;
     in property <[float]> player-bars;
@@ -333,6 +401,9 @@ export component AppWindow inherits Window {
     callback select-voice(string);
     callback compose();
     callback rewrite();
+    callback download-model(string);
+    callback delete-model(string);
+    callback activate-model(string);
     callback play-hist(string);
     callback star-hist(string, bool);
     callback delete-hist(string);
@@ -406,9 +477,10 @@ export component AppWindow inherits Window {
                         padding: 16px; spacing: 14px;
                         VerticalLayout {
                             spacing: 2px;
-                            Text { text: tab == "tts" ? "Text to Speech" : "Coming soon"; font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg; }
+                            Text { text: tab == "tts" ? "Text to Speech" : (tab == "models" ? "Models" : "Coming soon"); font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg; }
                             Text {
-                                text: tab == "tts" ? "Type it, pick a voice, hear it — all local." : "This screen is stubbed for now.";
+                                text: tab == "tts" ? "Type it, pick a voice, hear it — all local."
+                                    : (tab == "models" ? hardware-line : "This screen is stubbed for now.");
                                 font-size: 12px; color: Theme.name == "win95" ? #cfe6e6 : Theme.dim;
                             }
                         }
@@ -579,7 +651,7 @@ export component AppWindow inherits Window {
                     }
 
                     // ---- stub for other tabs ----
-                    if tab != "tts" : Rectangle {
+                    if tab != "tts" && tab != "models" : Rectangle {
                         HorizontalLayout {
                             alignment: center;
                             VerticalLayout {
@@ -587,6 +659,52 @@ export component AppWindow inherits Window {
                                 Text { text: "◈"; font-size: 34px; color: Theme.acc; horizontal-alignment: center; }
                                 Text { text: "Coming soon"; font-size: 16px; font-weight: 700; color: Theme.fg; horizontal-alignment: center; }
                                 TBtn { label: "Back to Text to Speech"; clicked => { tab = "tts"; } }
+                            }
+                        }
+                    }
+
+                    // ---- Models tab ----
+                    if tab == "models" : ScrollView {
+                        VerticalLayout {
+                            padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 8px;
+                            for sec in [
+                                { label: "VOICE & CLONING", cat: "voice" },
+                                { label: "TRANSCRIPTION", cat: "stt" },
+                                { label: "LANGUAGE (COMPOSE / REWRITE)", cat: "llm" },
+                            ] : VerticalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: sec.label; font-size: 11px; font-weight: 700;
+                                    color: Theme.name == "win95" ? #ffffff : Theme.dim;
+                                }
+                                if sec.cat == "voice" : VerticalLayout {
+                                    spacing: 8px;
+                                    for m in voice-models : ModelRow {
+                                        m: m;
+                                        download => { root.download-model(m.id); }
+                                        del => { root.delete-model(m.id); }
+                                        activate => { root.activate-model(m.id); }
+                                    }
+                                }
+                                if sec.cat == "stt" : VerticalLayout {
+                                    spacing: 8px;
+                                    for m in stt-models : ModelRow {
+                                        m: m;
+                                        download => { root.download-model(m.id); }
+                                        del => { root.delete-model(m.id); }
+                                        activate => { root.activate-model(m.id); }
+                                    }
+                                }
+                                if sec.cat == "llm" : VerticalLayout {
+                                    spacing: 8px;
+                                    for m in llm-models : ModelRow {
+                                        m: m;
+                                        download => { root.download-model(m.id); }
+                                        del => { root.delete-model(m.id); }
+                                        activate => { root.activate-model(m.id); }
+                                    }
+                                }
+                                Rectangle { height: 6px; }
                             }
                         }
                     }
