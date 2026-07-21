@@ -9,6 +9,7 @@ slint::include_modules!();
 use futures_util::StreamExt;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::rc::Rc;
 use syrinx_shared::EngineProxy;
 use tokio::sync::mpsc;
@@ -25,6 +26,12 @@ enum Cmd {
     Seek { id: String, pct: f64 },
     ExportAudio { id: String },
     ExportPackage { id: String },
+    CvStartRecord { system: bool },
+    CvStopRecord,
+    CvPickFile,
+    CvTranscribe,
+    CvCreate { name: String, desc: String, personality: String, language: String, transcript: String },
+    CvCancel,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -141,6 +148,45 @@ fn main() -> anyhow::Result<()> {
             let _ = tx.send(Cmd::ExportPackage { id: id.to_string() });
         });
     }
+    // --- create-voice modal ---
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_cv_start_record(move || {
+            let system = ui_weak.unwrap().get_cv_mode() == "system";
+            let _ = tx.send(Cmd::CvStartRecord { system });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_cv_stop_record(move || { let _ = tx.send(Cmd::CvStopRecord); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_cv_pick_file(move || { let _ = tx.send(Cmd::CvPickFile); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_cv_transcribe(move || { let _ = tx.send(Cmd::CvTranscribe); });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_cv_create(move || {
+            let ui = ui_weak.unwrap();
+            let _ = tx.send(Cmd::CvCreate {
+                name: ui.get_cv_name().to_string(),
+                desc: ui.get_cv_desc().to_string(),
+                personality: ui.get_cv_personality().to_string(),
+                language: ui.get_cv_language().to_string(),
+                transcript: ui.get_cv_transcript().to_string(),
+            });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_cv_cancel(move || { let _ = tx.send(Cmd::CvCancel); });
+    }
 
     let ui_weak = ui.as_weak();
     std::thread::spawn(move || {
@@ -252,6 +298,83 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
     GridData { grid, kokoro_names, kokoro_ids, default_selected }
 }
 
+/// Temp WAV path for in-modal recording (runtime dir → RAM, cleaned on logout).
+fn cv_wav_path() -> String {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(|d| format!("{d}/syrinx-cv-record.wav"))
+        .unwrap_or_else(|_| "/tmp/syrinx-cv-record.wav".into())
+}
+
+/// The default sink's `.monitor` source — a passive tap for system audio (the
+/// same approach as Voicebox). Works on analog/HDMI; Bluetooth A2DP monitors are
+/// silent, so those need a speaker/HDMI output while capturing.
+async fn default_monitor() -> Option<String> {
+    let out = tokio::process::Command::new("pactl")
+        .arg("get-default-sink")
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sink = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!sink.is_empty()).then(|| format!("{sink}.monitor"))
+}
+
+/// Spawn `parecord` to `wav`, optionally from a specific `device` (a sink's
+/// `.monitor` for system audio). We use `parecord` (PulseAudio) rather than
+/// `pw-record`: the latter's `--target` silently no-ops for monitors here, so it
+/// only ever recorded the (dead) default mic.
+async fn start_pw_record(wav: &str, device: Option<&str>) -> std::io::Result<tokio::process::Child> {
+    let _ = std::fs::remove_file(wav);
+    let mut cmd = tokio::process::Command::new("parecord");
+    cmd.args(["--file-format=wav", "--rate=24000", "--channels=1", "--format=s16le"]);
+    if let Some(d) = device {
+        cmd.arg(format!("--device={d}"));
+    }
+    cmd.arg(wav)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+/// RMS level of a PCM16 mono WAV (0..1), for detecting silent captures.
+fn wav_rms(path: &str) -> Option<f32> {
+    let bytes = std::fs::read(path).ok()?;
+    let data = bytes.windows(4).position(|w| w == b"data")? + 8; // past "data"+size
+    let pcm = bytes.get(data..)?;
+    let mut sumsq = 0f64;
+    let mut count = 0u64;
+    let mut i = 0;
+    while i + 1 < pcm.len() {
+        let s = i16::from_le_bytes([pcm[i], pcm[i + 1]]) as f64 / 32768.0;
+        sumsq += s * s;
+        count += 1;
+        i += 2;
+    }
+    (count > 0).then(|| (sumsq / count as f64).sqrt() as f32)
+}
+
+/// Label for a finished recording, warning if it came out silent.
+fn recorded_label(wav: &str) -> String {
+    match wav_rms(wav) {
+        Some(rms) if rms < 0.006 => "⚠ silent — check input / output device".into(),
+        _ => "clip recorded ✓".into(),
+    }
+}
+
+/// SIGINT `pw-record` so it finalizes the WAV header, then reap it.
+async fn stop_pw_record(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let _ = tokio::process::Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .await;
+    }
+    let _ = child.wait().await;
+}
+
 /// Format seconds as m:ss (Voicebox-style meta).
 fn fmt_dur(d: f64) -> String {
     let s = d.round().max(0.0) as i64;
@@ -331,6 +454,13 @@ async fn worker(
     let mut player_dur: f64 = 0.0;
     let mut current_play_gen: u32 = 0;
     let mut playing = false;
+    // create-voice modal state
+    let mut cv_rec: Option<tokio::process::Child> = None;
+    let cv_wav = cv_wav_path();
+    let mut cv_sample: Option<String> = None;
+    let mut rec_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut rec_elapsed: u32 = 0;
+    const REC_MAX: u32 = 30;
 
     loop {
         tokio::select! {
@@ -392,6 +522,26 @@ async fn worker(
                         set_history_model(&ui, items);
                     }
                 }).ok();
+            }
+            _ = rec_interval.tick(), if cv_rec.is_some() => {
+                rec_elapsed += 1;
+                if rec_elapsed >= REC_MAX {
+                    // hit the cap — auto-stop and keep the clip
+                    if let Some(mut child) = cv_rec.take() {
+                        stop_pw_record(&mut child).await;
+                        cv_sample = Some(cv_wav.clone());
+                        let label = recorded_label(&cv_wav);
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_cv_recording(false);
+                            ui.set_cv_sample_label(label.into());
+                        }).ok();
+                    }
+                } else {
+                    let e = rec_elapsed;
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_cv_sample_label(format!("● recording… {e}s / 30s").into());
+                    }).ok();
+                }
             }
             cmd = rx.recv() => match cmd {
                 Some(Cmd::Generate { text, voice }) => {
@@ -475,6 +625,109 @@ async fn worker(
                             Err(e) => tracing::error!("export package failed: {e}"),
                         }
                     }
+                }
+                Some(Cmd::CvStartRecord { system }) => {
+                    // System audio = passive tap of the default sink's monitor.
+                    let target = if system { default_monitor().await } else { None };
+                    match start_pw_record(&cv_wav, target.as_deref()).await {
+                        Ok(child) => {
+                            cv_rec = Some(child);
+                            rec_elapsed = 0;
+                            rec_interval.reset();  // first tick a full second out
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_cv_recording(true);
+                                ui.set_cv_sample_label("● recording… 0s / 30s".into());
+                            }).ok();
+                        }
+                        Err(e) => tracing::error!("pw-record failed: {e}"),
+                    }
+                }
+                Some(Cmd::CvStopRecord) => {
+                    if let Some(mut child) = cv_rec.take() {
+                        stop_pw_record(&mut child).await;
+                        cv_sample = Some(cv_wav.clone());
+                        let label = recorded_label(&cv_wav);
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_cv_recording(false);
+                            ui.set_cv_sample_label(label.into());
+                        }).ok();
+                    }
+                }
+                Some(Cmd::CvPickFile) => {
+                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                        .add_filter("Audio", &["wav", "flac", "ogg", "mp3", "m4a", "opus"])
+                        .pick_file()
+                        .await
+                    {
+                        cv_sample = Some(handle.path().to_string_lossy().to_string());
+                        let label = handle.file_name();
+                        ui.upgrade_in_event_loop(move |ui| ui.set_cv_sample_label(label.into())).ok();
+                    }
+                }
+                Some(Cmd::CvTranscribe) => {
+                    if let Some(path) = cv_sample.clone() {
+                        ui.upgrade_in_event_loop(|ui| ui.set_cv_transcribing(true)).ok();
+                        let text = proxy.transcribe(&path).await.unwrap_or_default();
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_cv_transcribing(false);
+                            ui.set_cv_transcript(text.into());
+                        }).ok();
+                    }
+                }
+                Some(Cmd::CvCreate { name, desc, personality, language, transcript }) => {
+                    if name.trim().is_empty() || cv_sample.is_none() {
+                        tracing::warn!("create voice: needs a name and a reference sample");
+                    } else {
+                        ui.upgrade_in_event_loop(|ui| ui.set_cv_creating(true)).ok();
+                        let sample = cv_sample.clone().unwrap();
+                        let spec = serde_json::json!({
+                            "name": name, "voice_type": "cloned", "language": language,
+                            "description": desc, "personality": personality, "default_engine": "qwen",
+                        }).to_string();
+                        let outcome = async {
+                            let pid = proxy.create_profile(&spec).await?;
+                            proxy.add_sample(&pid, &sample, &transcript).await?;
+                            zbus::Result::Ok(())
+                        }.await;
+                        match outcome {
+                            Ok(_) => {
+                                let raw = proxy.list_voices().await.unwrap_or_default();
+                                let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
+                                let GridData { grid, kokoro_names, kokoro_ids, .. } = build_grid(raw, &pj);
+                                cv_sample = None;
+                                ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_cv_creating(false);
+                                    ui.set_cv_open(false);
+                                    ui.set_cv_name("".into());
+                                    ui.set_cv_desc("".into());
+                                    ui.set_cv_personality("".into());
+                                    ui.set_cv_transcript("".into());
+                                    ui.set_cv_sample_label("".into());
+                                    ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(kokoro_names))));
+                                    ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
+                                    ui.set_voices(ModelRc::from(Rc::new(VecModel::from(grid))));
+                                }).ok();
+                            }
+                            Err(e) => {
+                                tracing::error!("create voice failed: {e}");
+                                ui.upgrade_in_event_loop(|ui| ui.set_cv_creating(false)).ok();
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::CvCancel) => {
+                    if let Some(mut child) = cv_rec.take() {
+                        stop_pw_record(&mut child).await;
+                    }
+                    cv_sample = None;
+                    ui.upgrade_in_event_loop(|ui| {
+                        ui.set_cv_recording(false);
+                        ui.set_cv_sample_label("".into());
+                        ui.set_cv_name("".into());
+                        ui.set_cv_desc("".into());
+                        ui.set_cv_personality("".into());
+                        ui.set_cv_transcript("".into());
+                    }).ok();
                 }
                 None => break,
             },

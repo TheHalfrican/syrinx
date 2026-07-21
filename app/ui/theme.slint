@@ -29,6 +29,14 @@ export global Theme {
       : name == "rice"  ? #89b4fa
       : name == "tui"   ? #3e6b3e
       : #ffffffa6;
+    // solid surface for modals/dialogs (most skin panels are translucent)
+    out property <brush> modal-bg:
+        name == "win95" ? #c0c0c0
+      : name == "ps5"   ? #10182a
+      : name == "rice"  ? #1e1e2e
+      : name == "tui"   ? #0b0f0b
+      : #eef4fb;
+
     out property <length> win-radius:
         name == "win95" ? 0px : name == "ps5" ? 20px : name == "rice" ? 12px : name == "tui" ? 0px : 10px;
 
