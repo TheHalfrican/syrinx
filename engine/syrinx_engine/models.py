@@ -62,8 +62,11 @@ CATALOG: list = [
               ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"], 1200,
               "Same 9 presets + instruct, lighter and faster.",
               gpu_recommended=True, min_ram_gb=4.0, supported=False),
+    # backend built (isolated .venv-luxtts + worker) but blocked on this box:
+    # torch 2.13.0+cpu has no working k2 build → vocoder segfaults. Flip to True
+    # once a k2-compatible torch is pinned (or on the CUDA 4090).
     ModelSpec("luxtts", "LuxTTS", "voice", "luxtts", "", ["YatharthS/LuxTTS"], 300,
-              "ZipVoice-based, 48kHz, >150x realtime. CPU-friendly, English.",
+              "ZipVoice-based, 48kHz, >150x realtime. CPU-friendly cloning, English.",
               gpu_recommended=False, min_ram_gb=2.0, supported=False),
     ModelSpec("chatterbox", "Chatterbox (Multilingual)", "voice", "chatterbox", "",
               ["ResembleAI/chatterbox"], 3200,

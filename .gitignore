@@ -37,3 +37,6 @@ HANDOFF.md
 *.swo
 *~
 .DS_Store
+
+# isolated LuxTTS engine venv
+engine/.venv-luxtts/

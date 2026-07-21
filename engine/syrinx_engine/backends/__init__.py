@@ -49,4 +49,8 @@ def make_backend(name: str | None = None):
         from .qwen import QwenBackend
 
         return QwenBackend()
-    raise ValueError(f"Unknown SYRINX_TTS_ENGINE={name!r} (expected: kokoro | qwen)")
+    if name == "luxtts":
+        from .luxtts import LuxTTSBackend
+
+        return LuxTTSBackend()
+    raise ValueError(f"Unknown SYRINX_TTS_ENGINE={name!r} (expected: kokoro | qwen | luxtts)")
