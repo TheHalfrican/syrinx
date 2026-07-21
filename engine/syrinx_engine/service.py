@@ -14,9 +14,21 @@ from dbus_next.constants import PropertyAccess
 from .tts import SpeechSynthesizer
 from .stt import Transcriber
 from .profiles import ProfileStore
+from .history import HistoryStore
 from . import audio
 
 log = logging.getLogger("syrinx.engine.service")
+
+
+class _PlayCtl:
+    """Cooperative playback control, polled by audio.play between blocks."""
+
+    __slots__ = ("stop", "paused", "seek")
+
+    def __init__(self) -> None:
+        self.stop = False
+        self.paused = False
+        self.seek = None  # float 0..1 to jump to, or None
 
 
 class EngineInterface(ServiceInterface):
@@ -25,9 +37,13 @@ class EngineInterface(ServiceInterface):
         self._profiles = ProfileStore()
         self._tts = SpeechSynthesizer(self._profiles)
         self._stt = Transcriber()
+        self._history = HistoryStore()
         self._model_loaded = False
         self._next_gen_id = 1
         self._tasks: dict[int, asyncio.Task] = {}
+        self._audio_lock = asyncio.Lock()  # only one output stream open at a time
+        self._ctl: _PlayCtl | None = None  # current playback control
+        self._play_epoch = 0               # latest playback request wins
 
     @property
     def backend_name(self) -> str:
@@ -45,6 +61,10 @@ class EngineInterface(ServiceInterface):
 
     @method()
     async def Speak(self, text: "s", voice_id: "s") -> "u":  # noqa: F821
+        return self._start_speak(text, voice_id)
+
+    def _start_speak(self, text: str, voice_id: str) -> int:
+        """Synthesize, persist to history, then play. Shared by Speak/Regenerate."""
         gen_id = self._next_gen_id
         self._next_gen_id += 1
 
@@ -53,9 +73,24 @@ class EngineInterface(ServiceInterface):
                 self.SpeakStarted(gen_id)
                 self.GenerationProgress(gen_id, "synthesizing", 0.0)
                 pcm, rate = await self._tts.synthesize(text, voice_id)
+                title = await self._voice_display_name(voice_id)
+                engine, lang = self._voice_meta(voice_id)
+                duration = audio.duration_of(pcm, rate)
+                # Persist before playback so the clip survives restarts.
+                clip_id = ""
+                try:
+                    item = self._history.save_clip(
+                        voice_id=voice_id, voice_name=title, text=text,
+                        pcm=pcm, sample_rate=rate, engine=engine, language=lang,
+                    )
+                    clip_id = item.id
+                except Exception:  # noqa: BLE001
+                    log.exception("history save failed for gen %d", gen_id)
                 self.GenerationProgress(gen_id, "playing", 1.0)
-                await audio.play(
-                    pcm, rate, on_level=lambda rms: self.AudioLevel(gen_id, rms)
+                bars = json.dumps(audio.envelope(pcm))
+                await self._play(
+                    gen_id, pcm, rate,
+                    on_start=lambda: self.PlaybackInfo(gen_id, clip_id, title, duration, bars),
                 )
             except asyncio.CancelledError:
                 pass
@@ -65,8 +100,55 @@ class EngineInterface(ServiceInterface):
                 self.SpeakEnded(gen_id)
                 self._tasks.pop(gen_id, None)
 
-        self._tasks[gen_id] = asyncio.create_task(run())
+        task = asyncio.create_task(run())
+        self._tasks[gen_id] = task
         return gen_id
+
+    async def _play(
+        self, gen_id: int, pcm: bytes, rate: int, *, on_start=None, start_pct: float = 0.0
+    ) -> None:
+        """Serialized playback: one stream at a time, latest request wins."""
+        self._play_epoch += 1
+        epoch = self._play_epoch
+        if self._ctl is not None:
+            self._ctl.stop = True  # ask the current clip to end
+        ctl = _PlayCtl()
+        if start_pct > 0.0:
+            ctl.seek = start_pct
+        async with self._audio_lock:  # waits until the previous stream has closed
+            if epoch != self._play_epoch:
+                return  # superseded by a newer request while we waited
+            self._ctl = ctl
+            if on_start is not None:
+                on_start()
+            try:
+                await audio.play(
+                    pcm, rate, ctl,
+                    on_level=lambda rms: self.AudioLevel(gen_id, rms),
+                    on_progress=lambda p: self.PlaybackProgress(gen_id, p),
+                )
+            finally:
+                if self._ctl is ctl:
+                    self._ctl = None
+
+    async def _voice_display_name(self, voice_id: str) -> str:
+        if voice_id.startswith("builtin:"):
+            for v in await self._tts.list_voices():
+                if v.id == voice_id:
+                    return v.name
+            return voice_id
+        prof = self._profiles.get(voice_id)
+        return prof.name if prof else voice_id
+
+    def _voice_meta(self, voice_id: str) -> "tuple[str, str]":
+        """(engine, language) for a voice id."""
+        if voice_id.startswith("builtin:"):
+            parts = voice_id.split(":", 2)
+            return (parts[1] if len(parts) > 1 else "kokoro"), "en"
+        prof = self._profiles.get(voice_id)
+        if prof is None:
+            return "", "en"
+        return (prof.default_engine or prof.preset_engine or ""), (prof.language or "en")
 
     @method()
     async def Transcribe(self, audio_path: "s") -> "s":  # noqa: F821
@@ -129,6 +211,87 @@ class EngineInterface(ServiceInterface):
     async def DeleteSample(self, sample_id: "s") -> None:  # noqa: F821
         self._profiles.delete_sample(sample_id)
 
+    # --- generation history --------------------------------------------
+
+    @method()
+    async def ListHistory(self) -> "s":  # noqa: F821
+        return json.dumps([h.to_dict() for h in self._history.list()])
+
+    @method()
+    async def PlayHistory(self, hid: "s") -> "u":  # noqa: F821
+        return self._play_history(hid, 0.0)
+
+    @method()
+    async def PlayHistoryAt(self, hid: "s", pct: "d") -> "u":  # noqa: F821
+        return self._play_history(hid, pct)
+
+    def _play_history(self, hid: str, start_pct: float) -> int:
+        item = self._history.get(hid)
+        loaded = self._history.read_pcm(hid)
+        if item is None or loaded is None:
+            return 0
+        pcm, rate = loaded
+        gen_id = self._next_gen_id
+        self._next_gen_id += 1
+        bars = json.dumps(audio.envelope(pcm))
+
+        async def run() -> None:
+            try:
+                self.SpeakStarted(gen_id)
+                await self._play(
+                    gen_id, pcm, rate, start_pct=start_pct,
+                    on_start=lambda: self.PlaybackInfo(gen_id, hid, item.voice_name, item.duration, bars),
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                log.exception("PlayHistory %s failed", hid)
+            finally:
+                self.SpeakEnded(gen_id)
+                self._tasks.pop(gen_id, None)
+
+        self._tasks[gen_id] = asyncio.create_task(run())
+        return gen_id
+
+    @method()
+    async def PausePlayback(self) -> None:  # noqa: F821
+        if self._ctl is not None:
+            self._ctl.paused = True
+
+    @method()
+    async def ResumePlayback(self) -> None:  # noqa: F821
+        if self._ctl is not None:
+            self._ctl.paused = False
+
+    @method()
+    async def SeekPlayback(self, pct: "d") -> None:  # noqa: F821
+        if self._ctl is not None:
+            self._ctl.seek = pct
+
+    @method()
+    async def StarHistory(self, hid: "s", starred: "b") -> None:  # noqa: F821
+        self._history.set_starred(hid, starred)
+
+    @method()
+    async def DeleteHistory(self, hid: "s") -> None:  # noqa: F821
+        self._history.delete(hid)
+
+    @method()
+    async def RegenerateHistory(self, hid: "s") -> "u":  # noqa: F821
+        item = self._history.get(hid)
+        if item is None:
+            return 0
+        return self._start_speak(item.text, item.voice_id)
+
+    @method()
+    async def ExportPackage(self, hid: "s", dest: "s") -> None:  # noqa: F821
+        self._history.export_package(hid, dest)
+
+    @method()
+    async def HistoryAudioPath(self, hid: "s") -> "s":  # noqa: F821
+        # Absolute WAV path so the app can copy it on "export audio".
+        return self._history.audio_abs_path(hid)
+
     @method()
     def Cancel(self, gen_id: "u") -> None:  # noqa: F821
         task = self._tasks.get(gen_id)
@@ -145,6 +308,15 @@ class EngineInterface(ServiceInterface):
     @signal()
     def AudioLevel(self, gen_id, rms) -> "ud":
         return [gen_id, rms]
+
+    @signal()
+    def PlaybackInfo(self, gen_id, clip_id, title, duration, bars) -> "ussds":
+        # clip_id, display title, seconds, and a JSON array of waveform bars (0..1)
+        return [gen_id, clip_id, title, duration, bars]
+
+    @signal()
+    def PlaybackProgress(self, gen_id, pct) -> "ud":
+        return [gen_id, pct]
 
     @signal()
     def SpeakStarted(self, gen_id) -> "u":

@@ -65,6 +65,41 @@ pub trait Engine {
     /// Delete a reference sample.
     fn delete_sample(&self, sample_id: &str) -> zbus::Result<()>;
 
+    // --- generation history (persisted clips) ---------------------------
+
+    /// List saved generations as a JSON array (newest first).
+    fn list_history(&self) -> zbus::Result<String>;
+
+    /// Replay a stored clip; returns a generation id (0 if not found).
+    fn play_history(&self, hid: &str) -> zbus::Result<u32>;
+
+    /// Replay a stored clip starting at `pct` (0..1); returns a generation id.
+    fn play_history_at(&self, hid: &str, pct: f64) -> zbus::Result<u32>;
+
+    /// Pause the current playback.
+    fn pause_playback(&self) -> zbus::Result<()>;
+
+    /// Resume the current playback.
+    fn resume_playback(&self) -> zbus::Result<()>;
+
+    /// Seek the current playback to `pct` (0..1).
+    fn seek_playback(&self, pct: f64) -> zbus::Result<()>;
+
+    /// Star/unstar a history entry.
+    fn star_history(&self, hid: &str, starred: bool) -> zbus::Result<()>;
+
+    /// Delete a history entry (row + audio file).
+    fn delete_history(&self, hid: &str) -> zbus::Result<()>;
+
+    /// Re-synthesize a history entry's text/voice as a new clip; returns a gen id.
+    fn regenerate_history(&self, hid: &str) -> zbus::Result<u32>;
+
+    /// Write a `.zip` package (manifest.json + audio) for a history entry to `dest`.
+    fn export_package(&self, hid: &str, dest: &str) -> zbus::Result<()>;
+
+    /// Absolute WAV path of a history entry (for the app to copy on export-audio).
+    fn history_audio_path(&self, hid: &str) -> zbus::Result<String>;
+
     /// Cancel an in-flight generation.
     fn cancel(&self, gen_id: u32) -> zbus::Result<()>;
 
@@ -79,6 +114,21 @@ pub trait Engine {
 
     #[zbus(signal)]
     fn audio_level(&self, gen_id: u32, rms: f64) -> zbus::Result<()>;
+
+    /// Emitted when playback of a clip starts: id, title, seconds, JSON waveform bars.
+    #[zbus(signal)]
+    fn playback_info(
+        &self,
+        gen_id: u32,
+        clip_id: String,
+        title: String,
+        duration: f64,
+        bars: String,
+    ) -> zbus::Result<()>;
+
+    /// Playback position (0..1), emitted per audio block.
+    #[zbus(signal)]
+    fn playback_progress(&self, gen_id: u32, pct: f64) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn speak_started(&self, gen_id: u32) -> zbus::Result<()>;
