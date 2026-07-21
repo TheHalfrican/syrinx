@@ -23,6 +23,8 @@ enum Cmd {
     Pause,
     Resume,
     Seek { id: String, pct: f64 },
+    ExportAudio { id: String },
+    ExportPackage { id: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -125,6 +127,18 @@ fn main() -> anyhow::Result<()> {
         let tx = tx.clone();
         ui.on_seek(move |id, pct| {
             let _ = tx.send(Cmd::Seek { id: id.to_string(), pct: pct as f64 });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_export_audio(move |id| {
+            let _ = tx.send(Cmd::ExportAudio { id: id.to_string() });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_export_package(move |id| {
+            let _ = tx.send(Cmd::ExportPackage { id: id.to_string() });
         });
     }
 
@@ -428,6 +442,37 @@ async fn worker(
                         match proxy.play_history_at(&id, pct).await {
                             Ok(gid) if gid != 0 => current_gen = gid,
                             _ => {}
+                        }
+                    }
+                }
+                Some(Cmd::ExportAudio { id }) => {
+                    let src = proxy.history_audio_path(&id).await.unwrap_or_default();
+                    if src.is_empty() {
+                        tracing::error!("export audio: no source for {id}");
+                    } else if let Some(handle) = rfd::AsyncFileDialog::new()
+                        .set_file_name("syrinx-clip.wav")
+                        .add_filter("WAV audio", &["wav"])
+                        .save_file()
+                        .await
+                    {
+                        let dest = handle.path().to_path_buf();
+                        match std::fs::copy(&src, &dest) {
+                            Ok(_) => tracing::info!("exported audio -> {}", dest.display()),
+                            Err(e) => tracing::error!("export audio copy failed: {e}"),
+                        }
+                    }
+                }
+                Some(Cmd::ExportPackage { id }) => {
+                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                        .set_file_name("syrinx-clip.zip")
+                        .add_filter("Zip package", &["zip"])
+                        .save_file()
+                        .await
+                    {
+                        let dest = handle.path().to_string_lossy().to_string();
+                        match proxy.export_package(&id, &dest).await {
+                            Ok(_) => tracing::info!("exported package -> {dest}"),
+                            Err(e) => tracing::error!("export package failed: {e}"),
                         }
                     }
                 }
