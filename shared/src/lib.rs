@@ -62,6 +62,14 @@ pub trait Engine {
     /// {sample_id, reference_text}.
     fn add_sample(&self, profile_id: &str, audio_path: &str, reference_text: &str) -> zbus::Result<String>;
 
+    /// Compose an in-character utterance for a voice, guided by `prompt` (empty =
+    /// unprompted). Returns a request id (0 if no personality); result via `LlmResult`.
+    fn compose_profile(&self, voice_id: &str, prompt: &str) -> zbus::Result<u32>;
+
+    /// Rewrite `text` in the voice's personality; returns a request id (0 if no
+    /// personality). The result arrives via `LlmResult`.
+    fn rewrite_profile(&self, voice_id: &str, text: &str) -> zbus::Result<u32>;
+
     /// Delete a reference sample.
     fn delete_sample(&self, sample_id: &str) -> zbus::Result<()>;
 
@@ -129,6 +137,10 @@ pub trait Engine {
     /// Playback position (0..1), emitted per audio block.
     #[zbus(signal)]
     fn playback_progress(&self, gen_id: u32, pct: f64) -> zbus::Result<()>;
+
+    /// Result of a Compose/Rewrite request (empty text = failed / no personality).
+    #[zbus(signal)]
+    fn llm_result(&self, req_id: u32, text: String) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn speak_started(&self, gen_id: u32) -> zbus::Result<()>;

@@ -15,6 +15,7 @@ from .tts import SpeechSynthesizer
 from .stt import Transcriber
 from .profiles import ProfileStore
 from .history import HistoryStore
+from .llm import PersonalityLLM
 from . import audio
 
 log = logging.getLogger("syrinx.engine.service")
@@ -38,8 +39,10 @@ class EngineInterface(ServiceInterface):
         self._tts = SpeechSynthesizer(self._profiles)
         self._stt = Transcriber()
         self._history = HistoryStore()
+        self._llm = PersonalityLLM()  # lazy — loads on first Compose/Rewrite
         self._model_loaded = False
         self._next_gen_id = 1
+        self._next_llm_id = 1
         self._tasks: dict[int, asyncio.Task] = {}
         self._audio_lock = asyncio.Lock()  # only one output stream open at a time
         self._ctl: _PlayCtl | None = None  # current playback control
@@ -211,6 +214,48 @@ class EngineInterface(ServiceInterface):
     async def DeleteSample(self, sample_id: "s") -> None:  # noqa: F821
         self._profiles.delete_sample(sample_id)
 
+    # --- personality LLM (compose / rewrite) ---------------------------
+
+    def _personality_of(self, voice_id: str) -> str:
+        if voice_id.startswith("builtin:"):
+            return ""
+        prof = self._profiles.get(voice_id)
+        return prof.personality if prof else ""
+
+    @method()
+    async def ComposeProfile(self, voice_id: "s", prompt: "s") -> "u":  # noqa: F821
+        personality = self._personality_of(voice_id)
+        if not personality:
+            return 0
+        return self._start_llm("compose", personality, prompt)
+
+    @method()
+    async def RewriteProfile(self, voice_id: "s", text: "s") -> "u":  # noqa: F821
+        personality = self._personality_of(voice_id)
+        if not personality or not text.strip():
+            return 0
+        return self._start_llm("rewrite", personality, text)
+
+    def _start_llm(self, kind: str, personality: str, text: str) -> int:
+        """Run compose/rewrite off the D-Bus call (LLM load + inference is slow);
+        deliver the result via the LlmResult signal, keyed by req_id."""
+        req_id = self._next_llm_id
+        self._next_llm_id += 1
+
+        async def run() -> None:
+            out = ""
+            try:
+                if kind == "compose":
+                    out = await self._llm.compose(personality, text)
+                else:
+                    out = await self._llm.rewrite(personality, text)
+            except Exception:  # noqa: BLE001
+                log.exception("llm %s failed", kind)
+            self.LlmResult(req_id, out)
+
+        asyncio.create_task(run())
+        return req_id
+
     # --- generation history --------------------------------------------
 
     @method()
@@ -317,6 +362,10 @@ class EngineInterface(ServiceInterface):
     @signal()
     def PlaybackProgress(self, gen_id, pct) -> "ud":
         return [gen_id, pct]
+
+    @signal()
+    def LlmResult(self, req_id, text) -> "us":
+        return [req_id, text]
 
     @signal()
     def SpeakStarted(self, gen_id) -> "u":
