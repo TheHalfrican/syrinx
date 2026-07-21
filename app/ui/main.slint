@@ -5,6 +5,26 @@ import { ScrollView, ComboBox } from "std-widgets.slint";
 export struct VoiceItem { id: string, name: string, desc: string, lang: string, kind: string }
 export struct HistItem { voice: string, meta: string, text: string }
 
+// --- Win95 3D bevel overlay (transparent center; draws a doubled 2px edge) ---
+// raised (default) = light top/left, dark bottom/right; sunken flips it (fields, pressed).
+component Bevel inherits Rectangle {
+    in property <bool> sunken: false;
+    property <color> tl1: sunken ? #808080 : #ffffff;   // outer top-left
+    property <color> br1: sunken ? #ffffff : #404040;   // outer bottom-right
+    property <color> tl2: sunken ? #404040 : #d4d0c8;   // inner top-left
+    property <color> br2: sunken ? #d4d0c8 : #808080;   // inner bottom-right
+    // outer edge
+    Rectangle { x: 0; y: 0; width: parent.width; height: 1px; background: tl1; }
+    Rectangle { x: 0; y: 0; width: 1px; height: parent.height; background: tl1; }
+    Rectangle { x: 0; y: parent.height - 1px; width: parent.width; height: 1px; background: br1; }
+    Rectangle { x: parent.width - 1px; y: 0; width: 1px; height: parent.height; background: br1; }
+    // inner edge (inset 1px)
+    Rectangle { x: 1px; y: 1px; width: parent.width - 2px; height: 1px; background: tl2; }
+    Rectangle { x: 1px; y: 1px; width: 1px; height: parent.height - 2px; background: tl2; }
+    Rectangle { x: 1px; y: parent.height - 2px; width: parent.width - 2px; height: 1px; background: br2; }
+    Rectangle { x: parent.width - 2px; y: 1px; width: 1px; height: parent.height - 2px; background: br2; }
+}
+
 // --- sidebar nav icon ---
 component NavIcon inherits Rectangle {
     in property <string> glyph;
@@ -25,11 +45,13 @@ component TBtn inherits Rectangle {
     in property <string> label;
     in property <bool> generate;
     callback clicked;
+    property <bool> win95: Theme.name == "win95";
     height: 30px;
     border-radius: Theme.rad;
-    border-width: 1px;
+    border-width: win95 ? 0px : 1px;
     border-color: generate ? Theme.acc : Theme.btn-brd;
-    background: ta2.pressed ? Theme.acc-soft : (generate ? Theme.gen-bg : Theme.btn-bg);
+    background: win95 ? (generate ? Theme.gen-bg : Theme.btn-bg)
+             : (ta2.pressed ? Theme.acc-soft : (generate ? Theme.gen-bg : Theme.btn-bg));
     horizontal-stretch: 0;
     ta2 := TouchArea { clicked => { root.clicked(); } }
     HorizontalLayout {
@@ -42,6 +64,7 @@ component TBtn inherits Rectangle {
             vertical-alignment: center; horizontal-alignment: center;
         }
     }
+    if win95 : Bevel { width: 100%; height: 100%; sunken: ta2.pressed; }
 }
 
 component Chip inherits Rectangle {
@@ -58,12 +81,14 @@ component VoiceCard inherits Rectangle {
     in property <VoiceItem> v;
     in property <string> selected;
     property <bool> active: v.id == selected;
+    property <bool> win95: Theme.name == "win95";
     callback clicked;
     border-radius: Theme.rad;
-    border-width: 1.5px;
+    border-width: win95 ? 0px : 1.5px;
     border-color: active ? Theme.acc : (ta.has-hover ? Theme.acc : Theme.brd);
     background: Theme.card-bg;
     ta := TouchArea { clicked => { root.clicked(); } }
+    if win95 : Bevel { width: 100%; height: 100%; sunken: active; }
     VerticalLayout {
         padding: 13px; spacing: 4px;
         HorizontalLayout {
@@ -109,7 +134,18 @@ export component AppWindow inherits Window {
 
     property <string> tab: "tts";
 
+    // --- Aero background image (behind everything; only for the vista skin) ---
+    if Theme.name == "vista" : Image {
+        source: @image-url("assets/backgrounds/Aero.png");
+        image-fit: cover;
+        x: 0; y: 0;
+        width: root.width;
+        height: root.height;
+    }
+
     VerticalLayout {
+        width: 100%;
+        height: 100%;
         // --- title bar ---
         Rectangle {
             height: 38px; background: Theme.tb-bg;
@@ -153,10 +189,10 @@ export component AppWindow inherits Window {
                         padding: 16px; spacing: 14px;
                         VerticalLayout {
                             spacing: 2px;
-                            Text { text: tab == "tts" ? "Text to Speech" : "Coming soon"; font-size: 19px; font-weight: 700; color: Theme.fg; }
+                            Text { text: tab == "tts" ? "Text to Speech" : "Coming soon"; font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg; }
                             Text {
                                 text: tab == "tts" ? "Type it, pick a voice, hear it — all local." : "This screen is stubbed for now.";
-                                font-size: 12px; color: Theme.dim;
+                                font-size: 12px; color: Theme.name == "win95" ? #cfe6e6 : Theme.dim;
                             }
                         }
                         Rectangle {}
@@ -194,7 +230,7 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 5; spacing: 10px;
                             HorizontalLayout {
                                 spacing: 10px;
-                                Text { text: "VOICES"; font-size: 12px; font-weight: 700; color: Theme.dim; vertical-alignment: center; }
+                                Text { text: "VOICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; vertical-alignment: center; }
                                 Rectangle {}
                                 TBtn { label: "Import voice"; clicked => {} }
                                 TBtn { label: "✦ Create voice"; generate: true; clicked => {} }
@@ -217,12 +253,13 @@ export component AppWindow inherits Window {
                             border-width: 1px; border-color: Theme.brd;
                             VerticalLayout {
                                 padding-left: 18px; spacing: 10px;
-                                Text { text: "HISTORY"; font-size: 12px; font-weight: 700; color: Theme.dim; }
+                                Text { text: "HISTORY"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
                                 ScrollView {
                                     VerticalLayout {
                                         spacing: 8px;
                                         for h[i] in history : Rectangle {
-                                            border-width: 1px; border-color: Theme.brd; border-radius: Theme.rad; background: Theme.card-bg;
+                                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad; background: Theme.card-bg;
+                                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
                                             VerticalLayout {
                                                 padding: 11px; spacing: 8px;
                                                 HorizontalLayout {
@@ -262,7 +299,9 @@ export component AppWindow inherits Window {
                         height: 118px;
                         Rectangle {
                             x: 22px; width: parent.width - 44px; y: 6px; height: parent.height - 24px;
-                            border-width: 1px; border-color: Theme.brd; border-radius: Theme.rad; background: Theme.card-bg;
+                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
+                            background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
                             VerticalLayout {
                                 padding: 12px; spacing: 8px;
                                 ti := TextInput {
@@ -303,6 +342,7 @@ export component AppWindow inherits Window {
                     // ---- footer ----
                     Rectangle {
                         height: 26px; border-width: 1px; border-color: Theme.brd;
+                        background: Theme.name == "win95" ? #c0c0c0 : transparent;
                         HorizontalLayout {
                             padding-left: 22px; padding-right: 22px; spacing: 14px;
                             Text { text: "syrinx v0.1.0"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
@@ -314,4 +354,7 @@ export component AppWindow inherits Window {
             }
         }
     }
+
+    // Win95 raised window frame (outermost 3D border)
+    if Theme.name == "win95" : Bevel { x: 0; y: 0; width: root.width; height: root.height; }
 }

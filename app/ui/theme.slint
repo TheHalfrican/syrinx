@@ -34,7 +34,7 @@ export global Theme {
 
     // --- title bar ---
     out property <brush> tb-bg:
-        name == "win95" ? @linear-gradient(90deg, #000080, #1084d0)
+        name == "win95" ? @linear-gradient(180deg, #2f9c96, #167f7a)
       : name == "ps5"   ? #0a0e1800
       : name == "rice"  ? #181825
       : name == "tui"   ? #0b0f0b
@@ -44,11 +44,11 @@ export global Theme {
 
     // --- panels ---
     out property <brush> side-bg:
-        name == "win95" ? #c0c0c0 : name == "ps5" ? #ffffff08 : name == "rice" ? #181825 : name == "tui" ? #0b0f0b : #ebf4fbbf;
+        name == "win95" ? #c0c0c0 : name == "ps5" ? #ffffff08 : name == "rice" ? #181825 : name == "tui" ? #0b0f0b : #ebf4fb.with-alpha(0.4);
     out property <brush> pan-bg:
-        name == "win95" ? #c0c0c0 : name == "ps5" ? #00000000 : name == "rice" ? #1e1e2e : name == "tui" ? #0b0f0b : #f4f8fc;
+        name == "win95" ? #1f8f8a : name == "ps5" ? #00000000 : name == "rice" ? #1e1e2e : name == "tui" ? #0b0f0b : #eef5fb.with-alpha(0.28);
     out property <brush> card-bg:
-        name == "win95" ? #ffffff : name == "ps5" ? #ffffff0e : name == "rice" ? #26263a : name == "tui" ? #101610 : #ffffff;
+        name == "win95" ? #d4d0c8 : name == "ps5" ? #ffffff0e : name == "rice" ? #26263a : name == "tui" ? #101610 : #ffffff.with-alpha(0.72);
     out property <color> brd:
         name == "win95" ? #808080 : name == "ps5" ? #ffffff1f : name == "rice" ? #363654 : name == "tui" ? #2c4a2c : #c8d6e2;
     out property <length> rad:
@@ -62,7 +62,7 @@ export global Theme {
 
     // --- accent ---
     out property <color> acc:
-        name == "win95" ? #000080 : name == "ps5" ? #2e6fe3 : name == "rice" ? #cba6f7 : name == "tui" ? #e0c56e : #1d84d6;
+        name == "win95" ? #0054e3 : name == "ps5" ? #2e6fe3 : name == "rice" ? #cba6f7 : name == "tui" ? #e0c56e : #1d84d6;
     out property <color> acc-soft:
         name == "win95" ? #d5d5e8 : name == "ps5" ? #2e6fe338 : name == "rice" ? #cba6f729 : name == "tui" ? #e0c56e1f : #1d84d624;
     out property <color> acc-fg:
@@ -70,14 +70,14 @@ export global Theme {
 
     // --- buttons ---
     out property <brush> btn-bg:
-        name == "win95" ? #c0c0c0 : name == "ps5" ? #ffffff14 : name == "rice" ? #2c2c44 : name == "tui" ? #101610
+        name == "win95" ? #d4d0c8 : name == "ps5" ? #ffffff14 : name == "rice" ? #2c2c44 : name == "tui" ? #101610
       : @linear-gradient(180deg, #fefefe, #e7edf3 45%, #d5dfe9 46%, #e9f1f8);
     out property <color> btn-fg: root.fg;
     out property <color> btn-brd:
         name == "win95" ? #808080 : name == "ps5" ? #ffffff29 : name == "rice" ? #3d3d5c : name == "tui" ? #3e6b3e : #8ba7bd;
 
     out property <brush> gen-bg:
-        name == "win95" ? #c0c0c0 : name == "ps5" ? #eef2f8 : name == "rice" ? @linear-gradient(90deg, #cba6f7, #89b4fa) : name == "tui" ? #a9d977
+        name == "win95" ? #d4d0c8 : name == "ps5" ? #eef2f8 : name == "rice" ? @linear-gradient(90deg, #cba6f7, #89b4fa) : name == "tui" ? #a9d977
       : @linear-gradient(180deg, #8fd3ff, #2f9ae0 45%, #1379bd 46%, #3fa4e8);
     out property <color> gen-fg:
         name == "win95" ? #000000 : name == "ps5" ? #0a0e18 : name == "rice" ? #11111b : name == "tui" ? #0b0f0b : #ffffff;
