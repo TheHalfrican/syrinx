@@ -48,6 +48,13 @@ class PersonalityLLM:
         self.model_size = os.environ.get("SYRINX_LLM_MODEL", "1.7B")
         self._device = "cpu"
 
+    def set_model(self, size: str) -> None:
+        """Switch the active LLM size; reloads lazily on next use."""
+        if size and size != self.model_size:
+            self.model_size = size
+            self._model = None
+            self._tokenizer = None
+
     async def load(self) -> None:
         if self._model is not None:
             return

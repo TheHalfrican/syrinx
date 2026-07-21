@@ -1,0 +1,299 @@
+"""Model catalog, hardware detection, download manager and active-model selection.
+
+One `ModelSpec` per downloadable model (mirrors Voicebox's ModelConfig registry).
+A "download" is `huggingface_hub.snapshot_download` into the HF cache; "cached" =
+the repo dir holds weight files with no `.incomplete` blobs. Progress is tracked
+by polling the repo's on-disk byte growth against `size_mb`.
+
+Active-model selection (which TTS engine/size, LLM size, STT model the engine
+uses) is persisted to $SYRINX_DATA_DIR/models.json.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .profiles import _data_dir
+
+log = logging.getLogger("syrinx.engine.models")
+
+
+@dataclass
+class ModelSpec:
+    id: str
+    display: str
+    category: str  # "voice" | "stt" | "llm"
+    engine: str  # kokoro|qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|whisper|qwen_llm
+    size: str  # "1.7B" | "0.6B" | "base.en" | ""
+    repos: list  # HF repo ids to fetch
+    size_mb: int
+    description: str
+    gpu_recommended: bool = False
+    min_ram_gb: float = 2.0
+    supported: bool = True  # has a working backend in Syrinx today
+
+
+# --- the catalog ------------------------------------------------------------
+# Repos are the ones Syrinx actually loads (e.g. faster-whisper CT2 builds, not
+# openai/whisper). `supported=False` = catalogued but no backend wired yet.
+
+CATALOG: list = [
+    # ---- Voice (TTS / cloning) ----
+    ModelSpec("kokoro", "Kokoro 82M", "voice", "kokoro", "", ["hexgrad/Kokoro-82M"],
+              350, "82M preset voices, 8 languages. CPU-realtime — great everywhere.",
+              gpu_recommended=False, min_ram_gb=2.0, supported=True),
+    ModelSpec("qwen-tts-1.7B", "Qwen TTS 1.7B", "voice", "qwen", "1.7B",
+              ["Qwen/Qwen3-TTS-12Hz-1.7B-Base"], 3500,
+              "Multilingual zero-shot voice cloning (10 langs). GPU strongly recommended.",
+              gpu_recommended=True, min_ram_gb=8.0, supported=True),
+    ModelSpec("qwen-tts-0.6B", "Qwen TTS 0.6B", "voice", "qwen", "0.6B",
+              ["Qwen/Qwen3-TTS-12Hz-0.6B-Base"], 1200,
+              "Lightweight Qwen voice cloning for lower-end hardware.",
+              gpu_recommended=True, min_ram_gb=4.0, supported=True),
+    ModelSpec("qwen-custom-voice-1.7B", "Qwen CustomVoice 1.7B", "voice", "qwen_custom_voice", "1.7B",
+              ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"], 3500,
+              "9 preset voices + natural-language style control (instruct).",
+              gpu_recommended=True, min_ram_gb=8.0, supported=False),
+    ModelSpec("qwen-custom-voice-0.6B", "Qwen CustomVoice 0.6B", "voice", "qwen_custom_voice", "0.6B",
+              ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"], 1200,
+              "Same 9 presets + instruct, lighter and faster.",
+              gpu_recommended=True, min_ram_gb=4.0, supported=False),
+    ModelSpec("luxtts", "LuxTTS", "voice", "luxtts", "", ["YatharthS/LuxTTS"], 300,
+              "ZipVoice-based, 48kHz, >150x realtime. CPU-friendly, English.",
+              gpu_recommended=False, min_ram_gb=2.0, supported=False),
+    ModelSpec("chatterbox", "Chatterbox (Multilingual)", "voice", "chatterbox", "",
+              ["ResembleAI/chatterbox"], 3200,
+              "23 languages with emotion exaggeration. GPU recommended.",
+              gpu_recommended=True, min_ram_gb=8.0, supported=False),
+    ModelSpec("chatterbox-turbo", "Chatterbox Turbo", "voice", "chatterbox_turbo", "",
+              ["ResembleAI/chatterbox-turbo"], 1500,
+              "350M English model with [laugh]/[cough] tags.",
+              gpu_recommended=True, min_ram_gb=4.0, supported=False),
+    ModelSpec("tada-1b", "TADA 1B", "voice", "tada", "1B",
+              ["HumeAI/tada-1b", "HumeAI/tada-codec", "unsloth/Llama-3.2-1B"], 4000,
+              "Llama-3.2-1B speech-LM, 700s+ coherent audio. English.",
+              gpu_recommended=True, min_ram_gb=8.0, supported=False),
+    ModelSpec("tada-3b-ml", "TADA 3B Multilingual", "voice", "tada", "3B",
+              ["HumeAI/tada-3b-ml", "HumeAI/tada-codec", "unsloth/Llama-3.2-1B"], 8000,
+              "Llama-3.2-3B speech-LM, 10 languages. Heavy.",
+              gpu_recommended=True, min_ram_gb=16.0, supported=False),
+    # ---- Transcription (faster-whisper / CTranslate2) ----
+    ModelSpec("whisper-base", "Whisper Base", "stt", "whisper", "base.en",
+              ["Systran/faster-whisper-base.en"], 150,
+              "74M params. Fast, moderate accuracy. English.",
+              gpu_recommended=False, min_ram_gb=2.0, supported=True),
+    ModelSpec("whisper-small", "Whisper Small", "stt", "whisper", "small",
+              ["Systran/faster-whisper-small"], 490,
+              "244M params. Balanced speed/accuracy, multilingual.",
+              gpu_recommended=False, min_ram_gb=2.0, supported=True),
+    ModelSpec("whisper-medium", "Whisper Medium", "stt", "whisper", "medium",
+              ["Systran/faster-whisper-medium"], 1500,
+              "769M params. Higher accuracy, multilingual.",
+              gpu_recommended=False, min_ram_gb=4.0, supported=True),
+    ModelSpec("whisper-large", "Whisper Large v3", "stt", "whisper", "large-v3",
+              ["Systran/faster-whisper-large-v3"], 3000,
+              "1.5B params. Best accuracy, multilingual.",
+              gpu_recommended=True, min_ram_gb=6.0, supported=True),
+    ModelSpec("whisper-turbo", "Whisper Turbo", "stt", "whisper", "large-v3-turbo",
+              ["deepdml/faster-whisper-large-v3-turbo-ct2"], 1600,
+              "Pruned large-v3: near-large accuracy, much faster.",
+              gpu_recommended=False, min_ram_gb=4.0, supported=True),
+    # ---- Language models (compose / rewrite) ----
+    ModelSpec("qwen3-0.6b", "Qwen3 0.6B", "llm", "qwen_llm", "0.6B", ["Qwen/Qwen3-0.6B"],
+              1400, "Very fast on CPU. Good for short compose/rewrite.",
+              gpu_recommended=False, min_ram_gb=3.0, supported=True),
+    ModelSpec("qwen3-1.7b", "Qwen3 1.7B", "llm", "qwen_llm", "1.7B", ["Qwen/Qwen3-1.7B"],
+              3500, "Balanced quality. Usable on CPU, snappy on GPU.",
+              gpu_recommended=False, min_ram_gb=6.0, supported=True),
+    ModelSpec("qwen3-4b", "Qwen3 4B", "llm", "qwen_llm", "4B", ["Qwen/Qwen3-4B"],
+              8000, "Highest-quality local rewrites. GPU recommended.",
+              gpu_recommended=True, min_ram_gb=12.0, supported=True),
+]
+
+_BY_ID = {m.id: m for m in CATALOG}
+
+
+def spec(model_id: str):
+    return _BY_ID.get(model_id)
+
+
+# --- hardware ---------------------------------------------------------------
+
+def detect_hardware() -> dict:
+    cores = os.cpu_count() or 1
+    ram_gb = 0.0
+    try:
+        ram_gb = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3), 1)
+    except Exception:  # noqa: BLE001
+        pass
+    gpu = False
+    gpu_name = ""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            gpu = True
+            gpu_name = torch.cuda.get_device_name(0)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"cores": cores, "ram_gb": ram_gb, "gpu": gpu, "gpu_name": gpu_name}
+
+
+def hardware_warning(m: "ModelSpec", hw: dict) -> str:
+    """A short warning if the machine is below the model's recommended specs."""
+    warns = []
+    if m.gpu_recommended and not hw["gpu"]:
+        warns.append("no GPU detected — will be slow on CPU")
+    if hw["ram_gb"] and hw["ram_gb"] < m.min_ram_gb:
+        warns.append(f"needs ~{m.min_ram_gb:g} GB RAM (have {hw['ram_gb']:g})")
+    return "; ".join(warns)
+
+
+# --- HF cache inspection ----------------------------------------------------
+
+def _hf_cache() -> Path:
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        return Path(HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001
+        return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _repo_dir(repo: str) -> Path:
+    return _hf_cache() / ("models--" + repo.replace("/", "--"))
+
+
+def _repo_bytes(repo: str) -> int:
+    blobs = _repo_dir(repo) / "blobs"
+    if not blobs.exists():
+        return 0
+    return sum(f.stat().st_size for f in blobs.glob("*") if f.is_file())
+
+
+def is_repo_cached(repo: str) -> bool:
+    d = _repo_dir(repo)
+    if not d.exists():
+        return False
+    blobs = d / "blobs"
+    if blobs.exists() and any(blobs.glob("*.incomplete")):
+        return False  # a download is in progress / was interrupted
+    snaps = d / "snapshots"
+    if not snaps.exists():
+        return False
+    weight_ext = (".safetensors", ".bin", ".pt", ".pth", ".npz", ".ckpt", ".onnx", ".gguf")
+    for f in snaps.rglob("*"):
+        if f.name.endswith(weight_ext):
+            return True
+    return False
+
+
+def is_cached(m: "ModelSpec") -> bool:
+    return all(is_repo_cached(r) for r in m.repos)
+
+
+# --- manager: download / delete / active selection --------------------------
+
+_DEFAULT_ACTIVE = {"voice": "kokoro", "stt": "whisper-base", "llm": "qwen3-1.7b"}
+
+
+class ModelManager:
+    def __init__(self) -> None:
+        self._settings = _data_dir() / "models.json"
+        self._active = dict(_DEFAULT_ACTIVE)
+        self._downloading: set = set()
+        try:
+            self._active.update(json.loads(self._settings.read_text()))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _save(self) -> None:
+        try:
+            self._settings.write_text(json.dumps(self._active, indent=2))
+        except Exception:  # noqa: BLE001
+            log.exception("save models.json failed")
+
+    # active selection ---------------------------------------------------
+    def active_id(self, category: str) -> str:
+        return self._active.get(category, _DEFAULT_ACTIVE.get(category, ""))
+
+    def active_spec(self, category: str):
+        return spec(self.active_id(category))
+
+    def set_active(self, model_id: str) -> str:
+        """Persist the active model for its category; returns the category."""
+        m = spec(model_id)
+        if not m:
+            return ""
+        self._active[m.category] = model_id
+        self._save()
+        return m.category
+
+    # status -------------------------------------------------------------
+    def status(self) -> list:
+        hw = detect_hardware()
+        return [
+            {
+                "id": m.id, "display": m.display, "category": m.category,
+                "engine": m.engine, "size": m.size, "size_mb": m.size_mb,
+                "description": m.description, "gpu_recommended": m.gpu_recommended,
+                "min_ram_gb": m.min_ram_gb, "supported": m.supported,
+                "downloaded": is_cached(m),
+                "downloading": m.id in self._downloading,
+                "active": self._active.get(m.category) == m.id,
+                "warning": hardware_warning(m, hw),
+            }
+            for m in CATALOG
+        ]
+
+    # download / delete --------------------------------------------------
+    async def download(self, model_id: str, on_progress) -> bool:
+        m = spec(model_id)
+        if not m or m.id in self._downloading:
+            return False
+        self._downloading.add(m.id)
+        total = max(1, m.size_mb) * 1024 * 1024
+        loop = asyncio.get_running_loop()
+        done = asyncio.Event()
+
+        async def poll() -> None:
+            while not done.is_set():
+                got = sum(_repo_bytes(r) for r in m.repos)
+                on_progress(model_id, min(0.999, got / total), "downloading")
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
+
+        def fetch() -> None:
+            from huggingface_hub import snapshot_download
+
+            for r in m.repos:
+                snapshot_download(r)
+
+        poll_task = asyncio.create_task(poll())
+        ok = True
+        try:
+            await loop.run_in_executor(None, fetch)
+        except Exception:  # noqa: BLE001
+            log.exception("download %s failed", model_id)
+            ok = False
+        finally:
+            done.set()
+            await poll_task
+            self._downloading.discard(m.id)
+        on_progress(model_id, 1.0 if ok else 0.0, "done" if ok else "error")
+        return ok
+
+    def delete(self, model_id: str) -> None:
+        m = spec(model_id)
+        if not m:
+            return
+        for r in m.repos:
+            d = _repo_dir(r)
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)

@@ -20,6 +20,12 @@ class Transcriber:
         self._model = None
         self.model_size = os.environ.get("SYRINX_WHISPER_MODEL", "base.en")
 
+    def set_model(self, identifier: str) -> None:
+        """Switch the whisper model (a size name or a HF repo); reloads lazily."""
+        if identifier and identifier != self.model_size:
+            self.model_size = identifier
+            self._model = None
+
     async def load(self) -> None:
         if self._model is not None:
             return

@@ -16,6 +16,7 @@ from .stt import Transcriber
 from .profiles import ProfileStore
 from .history import HistoryStore
 from .llm import PersonalityLLM
+from .models import ModelManager, spec as model_spec, detect_hardware
 from . import audio
 
 log = logging.getLogger("syrinx.engine.service")
@@ -40,6 +41,12 @@ class EngineInterface(ServiceInterface):
         self._stt = Transcriber()
         self._history = HistoryStore()
         self._llm = PersonalityLLM()  # lazy — loads on first Compose/Rewrite
+        self._models = ModelManager()
+        # apply persisted active-model choices to the lazy components
+        if (s := self._models.active_spec("llm")):
+            self._llm.set_model(s.size)
+        if (s := self._models.active_spec("stt")):
+            self._stt.set_model(s.repos[0])
         self._model_loaded = False
         self._next_gen_id = 1
         self._next_llm_id = 1
@@ -256,6 +263,44 @@ class EngineInterface(ServiceInterface):
         asyncio.create_task(run())
         return req_id
 
+    # --- model management ----------------------------------------------
+
+    @method()
+    async def ListModels(self) -> "s":  # noqa: F821
+        return json.dumps(self._models.status())
+
+    @method()
+    async def Hardware(self) -> "s":  # noqa: F821
+        return json.dumps(detect_hardware())
+
+    @method()
+    async def DownloadModel(self, model_id: "s") -> "b":  # noqa: F821
+        if not model_spec(model_id):
+            return False
+
+        async def run() -> None:
+            await self._models.download(
+                model_id, lambda mid, pct, st: self.ModelProgress(mid, pct, st)
+            )
+
+        asyncio.create_task(run())
+        return True
+
+    @method()
+    async def DeleteModel(self, model_id: "s") -> None:  # noqa: F821
+        self._models.delete(model_id)
+
+    @method()
+    async def SetActiveModel(self, model_id: "s") -> "s":  # noqa: F821
+        category = self._models.set_active(model_id)
+        s = model_spec(model_id)
+        if s and category == "llm":
+            self._llm.set_model(s.size)
+        elif s and category == "stt":
+            self._stt.set_model(s.repos[0])
+        # "voice" active-switching lands with the TTS backends (Phase 2)
+        return category
+
     # --- generation history --------------------------------------------
 
     @method()
@@ -366,6 +411,10 @@ class EngineInterface(ServiceInterface):
     @signal()
     def LlmResult(self, req_id, text) -> "us":
         return [req_id, text]
+
+    @signal()
+    def ModelProgress(self, model_id, pct, status) -> "sds":
+        return [model_id, pct, status]
 
     @signal()
     def SpeakStarted(self, gen_id) -> "u":

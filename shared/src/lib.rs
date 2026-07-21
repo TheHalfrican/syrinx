@@ -108,6 +108,23 @@ pub trait Engine {
     /// Absolute WAV path of a history entry (for the app to copy on export-audio).
     fn history_audio_path(&self, hid: &str) -> zbus::Result<String>;
 
+    // --- model management ----------------------------------------------
+
+    /// The model catalog as a JSON array (id, display, category, size, status…).
+    fn list_models(&self) -> zbus::Result<String>;
+
+    /// Detected hardware as JSON (cores, ram_gb, gpu, gpu_name).
+    fn hardware(&self) -> zbus::Result<String>;
+
+    /// Start downloading a model; progress arrives via `ModelProgress`.
+    fn download_model(&self, model_id: &str) -> zbus::Result<bool>;
+
+    /// Delete a downloaded model's files.
+    fn delete_model(&self, model_id: &str) -> zbus::Result<()>;
+
+    /// Make a model the active one for its category; returns the category.
+    fn set_active_model(&self, model_id: &str) -> zbus::Result<String>;
+
     /// Cancel an in-flight generation.
     fn cancel(&self, gen_id: u32) -> zbus::Result<()>;
 
@@ -141,6 +158,10 @@ pub trait Engine {
     /// Result of a Compose/Rewrite request (empty text = failed / no personality).
     #[zbus(signal)]
     fn llm_result(&self, req_id: u32, text: String) -> zbus::Result<()>;
+
+    /// Model download progress: pct 0..1, status "downloading"|"done"|"error".
+    #[zbus(signal)]
+    fn model_progress(&self, model_id: String, pct: f64, status: String) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn speak_started(&self, gen_id: u32) -> zbus::Result<()>;
