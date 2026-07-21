@@ -16,6 +16,13 @@ use tokio::sync::mpsc;
 enum Cmd {
     Generate { text: String, voice: String },
     Cancel { gen_id: u32 },
+    Play { id: String },
+    Star { id: String, on: bool },
+    Delete { id: String },
+    Regenerate { id: String },
+    Pause,
+    Resume,
+    Seek { id: String, pct: f64 },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -40,12 +47,15 @@ fn main() -> anyhow::Result<()> {
                 return;
             }
             ui.set_generating(true);
+            ui.set_synthesizing(true);
             history.insert(
                 0,
                 HistItem {
+                    id: "".into(),
                     voice: voice_name(&ui, &voice).into(),
                     meta: "generating…".into(),
                     text: text.clone().into(),
+                    starred: false,
                 },
             );
             let _ = tx.send(Cmd::Generate { text, voice });
@@ -62,8 +72,61 @@ fn main() -> anyhow::Result<()> {
     }
     // Selection is handled in Slint; nothing to do here yet.
     ui.on_select_voice(|_id| {});
-    // History playback needs per-clip audio persistence (roadmap); visual-only for now.
-    ui.on_play(|_idx| {});
+
+    // History actions.
+    {
+        let tx = tx.clone();
+        ui.on_play_hist(move |id| {
+            let _ = tx.send(Cmd::Play { id: id.to_string() });
+        });
+    }
+    {
+        let tx = tx.clone();
+        let history = history.clone();
+        ui.on_star_hist(move |id, on| {
+            // optimistic UI toggle; the engine persists it
+            for i in 0..history.row_count() {
+                if let Some(mut it) = history.row_data(i) {
+                    if it.id == id {
+                        it.starred = on;
+                        history.set_row_data(i, it);
+                        break;
+                    }
+                }
+            }
+            let _ = tx.send(Cmd::Star { id: id.to_string(), on });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_delete_hist(move |id| {
+            let _ = tx.send(Cmd::Delete { id: id.to_string() });
+        });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_regen_hist(move |id| {
+            let ui = ui_weak.unwrap();
+            ui.set_generating(true);
+            ui.set_synthesizing(true);
+            let _ = tx.send(Cmd::Regenerate { id: id.to_string() });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_pause(move || { let _ = tx.send(Cmd::Pause); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_resume(move || { let _ = tx.send(Cmd::Resume); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_seek(move |id, pct| {
+            let _ = tx.send(Cmd::Seek { id: id.to_string(), pct: pct as f64 });
+        });
+    }
 
     let ui_weak = ui.as_weak();
     std::thread::spawn(move || {
@@ -175,6 +238,50 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
     GridData { grid, kokoro_names, kokoro_ids, default_selected }
 }
 
+/// Format seconds as m:ss (Voicebox-style meta).
+fn fmt_dur(d: f64) -> String {
+    let s = d.round().max(0.0) as i64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Build the history model from the engine's ListHistory JSON (newest first).
+fn build_history(json: &str) -> Vec<HistItem> {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+    arr.iter()
+        .map(|h| {
+            let get = |k: &str| h.get(k).and_then(|v| v.as_str()).unwrap_or("");
+            let voice = {
+                let n = get("voice_name");
+                if n.is_empty() { get("voice_id") } else { n }
+            };
+            let engine = get("engine");
+            let lang = get("language");
+            let dur = h.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let meta = if engine.is_empty() {
+                format!("{} · {}", fmt_dur(dur), lang)
+            } else {
+                format!("{} · {} · {}", engine, fmt_dur(dur), lang)
+            };
+            HistItem {
+                id: get("id").into(),
+                voice: voice.into(),
+                meta: meta.into(),
+                text: get("text").into(),
+                starred: h.get("starred").and_then(|v| v.as_bool()).unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
+/// Replace the history model's contents in place (keeps the shared VecModel).
+fn set_history_model(ui: &AppWindow, items: Vec<HistItem>) {
+    if let Some(vm) = ui.get_history().as_any().downcast_ref::<VecModel<HistItem>>() {
+        vm.set_vec(items);
+    } else {
+        ui.set_history(ModelRc::from(Rc::new(VecModel::from(items))));
+    }
+}
+
 async fn worker(
     ui: slint::Weak<AppWindow>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
@@ -187,6 +294,7 @@ async fn worker(
     let profiles_json = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
     let GridData { grid, kokoro_names, kokoro_ids, default_selected } =
         build_grid(raw, &profiles_json);
+    let hist_items = build_history(&proxy.list_history().await.unwrap_or_else(|_| "[]".into()));
     {
         ui.upgrade_in_event_loop(move |ui| {
             ui.set_backend(backend.into());
@@ -196,13 +304,19 @@ async fn worker(
             ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(kokoro_names))));
             ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
             ui.set_voices(ModelRc::from(Rc::new(VecModel::from(grid))));
+            set_history_model(&ui, hist_items);
         })
         .ok();
     }
 
     let mut levels = proxy.receive_audio_level().await?;
     let mut ended = proxy.receive_speak_ended().await?;
+    let mut pinfo = proxy.receive_playback_info().await?;
+    let mut pprog = proxy.receive_playback_progress().await?;
     let mut current_gen: u32 = 0;
+    let mut player_dur: f64 = 0.0;
+    let mut current_play_gen: u32 = 0;
+    let mut playing = false;
 
     loop {
         tokio::select! {
@@ -212,16 +326,56 @@ async fn worker(
                     ui.upgrade_in_event_loop(move |ui| ui.set_level(rms)).ok();
                 }
             }
-            Some(_) = ended.next() => {
-                ui.upgrade_in_event_loop(|ui| {
+            Some(sig) = pinfo.next() => {
+                if let Ok(a) = sig.args() {
+                    current_play_gen = a.gen_id;
+                    playing = true;
+                    player_dur = a.duration;
+                    let bars: Vec<f32> = serde_json::from_str(&a.bars).unwrap_or_default();
+                    let title = a.title;
+                    let clip_id = a.clip_id;
+                    let time = format!("0:00 / {}", fmt_dur(a.duration));
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_player_bars(ModelRc::from(Rc::new(VecModel::from(bars))));
+                        ui.set_player_title(title.into());
+                        ui.set_player_id(clip_id.into());
+                        ui.set_player_time(time.into());
+                        ui.set_play_pct(0.0);
+                        ui.set_player_active(true);
+                        ui.set_player_playing(true);
+                        ui.set_player_paused(false);
+                        ui.set_synthesizing(false);
+                    }).ok();
+                }
+            }
+            Some(sig) = pprog.next() => {
+                if let Ok(a) = sig.args() {
+                    if a.gen_id == current_play_gen {
+                        let pct = a.pct as f32;
+                        let time = format!("{} / {}", fmt_dur(a.pct * player_dur), fmt_dur(player_dur));
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_play_pct(pct);
+                            ui.set_player_time(time.into());
+                        }).ok();
+                    }
+                }
+            }
+            Some(sig) = ended.next() => {
+                let is_current = sig.args().map(|a| a.gen_id == current_play_gen).unwrap_or(false);
+                if is_current { playing = false; }
+                // Refresh history only on success — never wipe the list on a failed call.
+                let refreshed = proxy.list_history().await.ok().map(|j| build_history(&j));
+                ui.upgrade_in_event_loop(move |ui| {
                     ui.set_generating(false);
+                    ui.set_synthesizing(false);
                     ui.set_level(0.0);
-                    let h = ui.get_history();
-                    if h.row_count() > 0 {
-                        if let Some(mut item) = h.row_data(0) {
-                            item.meta = "done".into();
-                            h.set_row_data(0, item);
-                        }
+                    if is_current {
+                        ui.set_player_playing(false);
+                        ui.set_player_paused(false);
+                        ui.set_play_pct(1.0);
+                    }
+                    if let Some(items) = refreshed {
+                        set_history_model(&ui, items);
                     }
                 }).ok();
             }
@@ -235,6 +389,47 @@ async fn worker(
                 Some(Cmd::Cancel { gen_id }) => {
                     let id = if gen_id == 0 { current_gen } else { gen_id };
                     if id != 0 { proxy.cancel(id).await.ok(); }
+                }
+                Some(Cmd::Play { id }) => {
+                    match proxy.play_history(&id).await {
+                        Ok(gid) if gid != 0 => current_gen = gid,
+                        Ok(_) => {}
+                        Err(e) => tracing::error!("play_history failed: {e}"),
+                    }
+                }
+                Some(Cmd::Star { id, on }) => {
+                    if let Err(e) = proxy.star_history(&id, on).await {
+                        tracing::error!("star_history failed: {e}");
+                    }
+                }
+                Some(Cmd::Delete { id }) => {
+                    if let Err(e) = proxy.delete_history(&id).await {
+                        tracing::error!("delete_history failed: {e}");
+                    }
+                    if let Ok(json) = proxy.list_history().await {
+                        let items = build_history(&json);
+                        ui.upgrade_in_event_loop(move |ui| set_history_model(&ui, items)).ok();
+                    }
+                }
+                Some(Cmd::Regenerate { id }) => {
+                    match proxy.regenerate_history(&id).await {
+                        Ok(gid) if gid != 0 => current_gen = gid,
+                        Ok(_) => {}
+                        Err(e) => tracing::error!("regenerate_history failed: {e}"),
+                    }
+                }
+                Some(Cmd::Pause) => { proxy.pause_playback().await.ok(); }
+                Some(Cmd::Resume) => { proxy.resume_playback().await.ok(); }
+                Some(Cmd::Seek { id, pct }) => {
+                    if playing {
+                        proxy.seek_playback(pct).await.ok();
+                    } else {
+                        // not playing — start from the clicked position
+                        match proxy.play_history_at(&id, pct).await {
+                            Ok(gid) if gid != 0 => current_gen = gid,
+                            _ => {}
+                        }
+                    }
                 }
                 None => break,
             },
