@@ -2,7 +2,7 @@
 import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 
-export struct VoiceItem { id: string, name: string, desc: string, lang: string, kind: string }
+export struct VoiceItem { id: string, name: string, desc: string, lang: string, kind: string, has-personality: bool }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
 
 // --- Win95 3D bevel overlay (transparent center; draws a doubled 2px edge) ---
@@ -177,10 +177,12 @@ component KokoroCard inherits Rectangle {
     property <bool> win95: Theme.name == "win95";
     border-radius: Theme.rad;
     border-width: win95 ? 0px : 1.5px;
-    border-color: active ? Theme.acc : Theme.brd;
+    border-color: active ? Theme.acc : (cta.has-hover ? Theme.acc : Theme.brd);
     background: Theme.card-bg;
     clip: true;
     if win95 : Bevel { width: 100%; height: 100%; sunken: active; }
+    // click anywhere but the dropdown to (re)select the current preset
+    cta := TouchArea { clicked => { root.pick(ids[dd.current-index]); } }
     VerticalLayout {
         padding: 13px; spacing: 6px;
         HorizontalLayout {
@@ -197,7 +199,7 @@ component KokoroCard inherits Rectangle {
         }
         Text { text: names.length + " bundled preset voices"; font-size: 11.5px; color: Theme.dim; }
         Rectangle {}  // flex spacer
-        ThemedDropdown {
+        dd := ThemedDropdown {
             model: names;
             current-index: 0;
             selected(i) => { root.pick(ids[i]); }
@@ -301,6 +303,8 @@ export component AppWindow inherits Window {
     in property <bool> generating;
     in property <float> level;
     in property <string> backend: "cpu";
+    in property <bool> selected-has-personality;
+    in property <bool> llm-busy;
     // --- player (full-clip waveform + scrub) ---
     in property <bool> player-active;
     in property <[float]> player-bars;
@@ -327,6 +331,8 @@ export component AppWindow inherits Window {
     callback generate();
     callback stop();
     callback select-voice(string);
+    callback compose();
+    callback rewrite();
     callback play-hist(string);
     callback star-hist(string, bool);
     callback delete-hist(string);
@@ -667,8 +673,8 @@ export component AppWindow inherits Window {
                                     height: 40px;
                                     single-line: false;
                                 }
-                                // indeterminate "synthesizing" bar — looping marquee via animation-tick()
-                                if synthesizing : Rectangle {
+                                // indeterminate "working" bar — looping marquee via animation-tick()
+                                if synthesizing || llm-busy : Rectangle {
                                     height: 4px; border-radius: 2px; background: Theme.chip-bg; clip: true;
                                     Rectangle {
                                         height: 100%; width: parent.width * 0.35;
@@ -682,9 +688,18 @@ export component AppWindow inherits Window {
                                         text: "engine: " + backend; font-size: 10.5px; font-family: Theme.mono;
                                         color: Theme.dim; vertical-alignment: center;
                                     }
+                                    // personality LLM (only for voices that have one)
+                                    if selected-has-personality : TBtn {
+                                        label: llm-busy ? "…" : "✎ Compose";
+                                        clicked => { if (!llm-busy) { root.compose(); } }
+                                    }
+                                    if selected-has-personality : TBtn {
+                                        label: llm-busy ? "…" : "✦ Rewrite";
+                                        clicked => { if (!llm-busy && text != "") { root.rewrite(); } }
+                                    }
                                     Rectangle {}
                                     Text {
-                                        text: generating ? "synthesizing…" : "pick a voice, then Generate";
+                                        text: llm-busy ? "thinking…" : (generating ? "synthesizing…" : "pick a voice, then Generate");
                                         font-size: 10.5px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center;
                                     }
                                     TBtn {

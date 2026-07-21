@@ -32,6 +32,8 @@ enum Cmd {
     CvTranscribe,
     CvCreate { name: String, desc: String, personality: String, language: String, transcript: String },
     CvCancel,
+    Compose { voice_id: String, prompt: String },
+    Rewrite { voice_id: String, text: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -79,8 +81,52 @@ fn main() -> anyhow::Result<()> {
             let _ = tx.send(Cmd::Cancel { gen_id: 0 });
         });
     }
-    // Selection is handled in Slint; nothing to do here yet.
-    ui.on_select_voice(|_id| {});
+    // Track whether the selected voice has a personality (gates Compose/Rewrite).
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_select_voice(move |id| {
+            let ui = ui_weak.unwrap();
+            let voices = ui.get_voices();
+            let mut hp = false;
+            for i in 0..voices.row_count() {
+                if let Some(v) = voices.row_data(i) {
+                    if v.id == id {
+                        hp = v.has_personality;
+                        break;
+                    }
+                }
+            }
+            ui.set_selected_has_personality(hp);
+        });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_compose(move || {
+            let ui = ui_weak.unwrap();
+            ui.set_llm_busy(true);
+            let _ = tx.send(Cmd::Compose {
+                voice_id: ui.get_selected_voice().to_string(),
+                prompt: ui.get_text().to_string(),
+            });
+        });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_rewrite(move || {
+            let ui = ui_weak.unwrap();
+            let text = ui.get_text().to_string();
+            if text.trim().is_empty() {
+                return;
+            }
+            ui.set_llm_busy(true);
+            let _ = tx.send(Cmd::Rewrite {
+                voice_id: ui.get_selected_voice().to_string(),
+                text,
+            });
+        });
+    }
 
     // History actions.
     {
@@ -251,14 +297,15 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
             kokoro_names.push(name.into());
             kokoro_ids.push(id.into());
         } else {
+            let hp = pmap
+                .get(&id)
+                .and_then(|p| p.get("has_personality"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let (desc, lang, kind) = if let Some(p) = pmap.get(&id) {
                 let vt = p.get("voice_type").and_then(|v| v.as_str()).unwrap_or("voice");
                 let l = p.get("language").and_then(|v| v.as_str()).unwrap_or("en");
-                let d = if p.get("has_personality").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    "Has personality"
-                } else {
-                    "Custom voice"
-                };
+                let d = if hp { "Has personality" } else { "Custom voice" };
                 (d.to_string(), l.to_string(), vt.to_string())
             } else {
                 (String::new(), "en".to_string(), "voice".to_string())
@@ -269,6 +316,7 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
                 desc: desc.into(),
                 lang: lang.into(),
                 kind: kind.into(),
+                has_personality: hp,
             });
         }
     }
@@ -282,6 +330,7 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
         desc: "".into(),
         lang: "".into(),
         kind: "model-defaults".into(),
+        has_personality: false,
     });
     grid.extend(users);
     while grid.len() % 3 != 0 {
@@ -291,6 +340,7 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
             desc: "".into(),
             lang: "".into(),
             kind: "empty".into(),
+            has_personality: false,
         });
     }
 
@@ -450,6 +500,8 @@ async fn worker(
     let mut ended = proxy.receive_speak_ended().await?;
     let mut pinfo = proxy.receive_playback_info().await?;
     let mut pprog = proxy.receive_playback_progress().await?;
+    let mut llm_res = proxy.receive_llm_result().await?;
+    let mut pending_llm: u32 = 0;
     let mut current_gen: u32 = 0;
     let mut player_dur: f64 = 0.0;
     let mut current_play_gen: u32 = 0;
@@ -490,6 +542,20 @@ async fn worker(
                         ui.set_player_paused(false);
                         ui.set_synthesizing(false);
                     }).ok();
+                }
+            }
+            Some(sig) = llm_res.next() => {
+                if let Ok(a) = sig.args() {
+                    if a.req_id == pending_llm && pending_llm != 0 {
+                        pending_llm = 0;
+                        let text = a.text;
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_llm_busy(false);
+                            if !text.trim().is_empty() {
+                                ui.set_text(text.into());
+                            }
+                        }).ok();
+                    }
                 }
             }
             Some(sig) = pprog.next() => {
@@ -713,6 +779,18 @@ async fn worker(
                                 ui.upgrade_in_event_loop(|ui| ui.set_cv_creating(false)).ok();
                             }
                         }
+                    }
+                }
+                Some(Cmd::Compose { voice_id, prompt }) => {
+                    match proxy.compose_profile(&voice_id, &prompt).await {
+                        Ok(rid) if rid != 0 => pending_llm = rid,
+                        _ => { ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok(); }
+                    }
+                }
+                Some(Cmd::Rewrite { voice_id, text }) => {
+                    match proxy.rewrite_profile(&voice_id, &text).await {
+                        Ok(rid) if rid != 0 => pending_llm = rid,
+                        _ => { ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok(); }
                     }
                 }
                 Some(Cmd::CvCancel) => {
