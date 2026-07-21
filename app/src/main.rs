@@ -7,7 +7,7 @@
 slint::include_modules!();
 
 use futures_util::StreamExt;
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
 use std::rc::Rc;
 use syrinx_shared::EngineProxy;
@@ -62,6 +62,8 @@ fn main() -> anyhow::Result<()> {
     }
     // Selection is handled in Slint; nothing to do here yet.
     ui.on_select_voice(|_id| {});
+    // History playback needs per-clip audio persistence (roadmap); visual-only for now.
+    ui.on_play(|_idx| {});
 
     let ui_weak = ui.as_weak();
     std::thread::spawn(move || {
@@ -84,12 +86,31 @@ fn voice_name(ui: &AppWindow, id: &str) -> String {
             }
         }
     }
+    // Kokoro presets live in a separate model (the dropdown), not the card grid.
+    let ids = ui.get_kokoro_ids();
+    let names = ui.get_kokoro_names();
+    for i in 0..ids.row_count() {
+        if ids.row_data(i).map(|s| s.as_str() == id).unwrap_or(false) {
+            if let Some(n) = names.row_data(i) {
+                return n.to_string();
+            }
+        }
+    }
     id.to_string()
 }
 
-/// Build the voice list from ListVoices (built-ins + profile ids) enriched with
-/// profile details from ListProfiles.
-fn build_voices(raw: Vec<(String, String)>, profiles_json: &str) -> Vec<VoiceItem> {
+/// The voices grid, split for the UI: bundled presets collapse into the Kokoro
+/// dropdown; user-created profiles become individual cards.
+struct GridData {
+    grid: Vec<VoiceItem>,          // [Kokoro card, user voices…, spacer padding]
+    kokoro_names: Vec<SharedString>,
+    kokoro_ids: Vec<SharedString>,
+    default_selected: String,      // a bundled voice, so generation works out of the box
+}
+
+/// Build the grid from ListVoices (built-ins `builtin:…` + profile ids) enriched
+/// with profile details from ListProfiles.
+fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
     let profs: Vec<serde_json::Value> = serde_json::from_str(profiles_json).unwrap_or_default();
     let mut pmap: HashMap<String, serde_json::Value> = HashMap::new();
     for p in profs {
@@ -97,11 +118,17 @@ fn build_voices(raw: Vec<(String, String)>, profiles_json: &str) -> Vec<VoiceIte
             pmap.insert(id.to_string(), p);
         }
     }
-    raw.into_iter()
-        .map(|(id, name)| {
-            let (desc, lang, kind) = if id.starts_with("builtin:") {
-                ("Kokoro preset".to_string(), "en".to_string(), "bundled".to_string())
-            } else if let Some(p) = pmap.get(&id) {
+
+    let mut kokoro_names: Vec<SharedString> = Vec::new();
+    let mut kokoro_ids: Vec<SharedString> = Vec::new();
+    let mut users: Vec<VoiceItem> = Vec::new();
+
+    for (id, name) in raw {
+        if id.starts_with("builtin:") {
+            kokoro_names.push(name.into());
+            kokoro_ids.push(id.into());
+        } else {
+            let (desc, lang, kind) = if let Some(p) = pmap.get(&id) {
                 let vt = p.get("voice_type").and_then(|v| v.as_str()).unwrap_or("voice");
                 let l = p.get("language").and_then(|v| v.as_str()).unwrap_or("en");
                 let d = if p.get("has_personality").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -113,15 +140,39 @@ fn build_voices(raw: Vec<(String, String)>, profiles_json: &str) -> Vec<VoiceIte
             } else {
                 (String::new(), "en".to_string(), "voice".to_string())
             };
-            VoiceItem {
+            users.push(VoiceItem {
                 id: id.into(),
                 name: name.into(),
                 desc: desc.into(),
                 lang: lang.into(),
                 kind: kind.into(),
-            }
-        })
-        .collect()
+            });
+        }
+    }
+
+    // grid = Kokoro Defaults card + user cards, padded to a multiple of 3 with
+    // invisible spacers so the 3-column GridLayout always has full first row.
+    let mut grid: Vec<VoiceItem> = Vec::with_capacity(users.len() + 3);
+    grid.push(VoiceItem {
+        id: "__kokoro__".into(),
+        name: "Kokoro Defaults".into(),
+        desc: "".into(),
+        lang: "".into(),
+        kind: "model-defaults".into(),
+    });
+    grid.extend(users);
+    while grid.len() % 3 != 0 {
+        grid.push(VoiceItem {
+            id: "".into(),
+            name: "".into(),
+            desc: "".into(),
+            lang: "".into(),
+            kind: "empty".into(),
+        });
+    }
+
+    let default_selected = kokoro_ids.first().map(|s| s.to_string()).unwrap_or_default();
+    GridData { grid, kokoro_names, kokoro_ids, default_selected }
 }
 
 async fn worker(
@@ -134,15 +185,17 @@ async fn worker(
     let backend = proxy.backend().await.unwrap_or_else(|_| "cpu".into());
     let raw = proxy.list_voices().await.unwrap_or_default();
     let profiles_json = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
-    let items = build_voices(raw, &profiles_json);
-    let first = items.first().map(|v| v.id.to_string()).unwrap_or_default();
+    let GridData { grid, kokoro_names, kokoro_ids, default_selected } =
+        build_grid(raw, &profiles_json);
     {
         ui.upgrade_in_event_loop(move |ui| {
             ui.set_backend(backend.into());
             if ui.get_selected_voice().is_empty() {
-                ui.set_selected_voice(first.into());
+                ui.set_selected_voice(default_selected.into());
             }
-            ui.set_voices(ModelRc::from(Rc::new(VecModel::from(items))));
+            ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(kokoro_names))));
+            ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
+            ui.set_voices(ModelRc::from(Rc::new(VecModel::from(grid))));
         })
         .ok();
     }

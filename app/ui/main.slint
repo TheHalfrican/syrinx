@@ -1,6 +1,6 @@
 // Syrinx — main window. Themed shell + TTS workspace, wired to the engine.
 import { Theme } from "theme.slint";
-import { ScrollView, ComboBox } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 
 export struct VoiceItem { id: string, name: string, desc: string, lang: string, kind: string }
 export struct HistItem { voice: string, meta: string, text: string }
@@ -87,13 +87,14 @@ component VoiceCard inherits Rectangle {
     border-width: win95 ? 0px : 1.5px;
     border-color: active ? Theme.acc : (ta.has-hover ? Theme.acc : Theme.brd);
     background: Theme.card-bg;
+    clip: true;
     ta := TouchArea { clicked => { root.clicked(); } }
     if win95 : Bevel { width: 100%; height: 100%; sunken: active; }
     VerticalLayout {
         padding: 13px; spacing: 4px;
         HorizontalLayout {
             spacing: 8px;
-            Text { text: v.name; font-size: 14px; font-weight: 700; color: Theme.fg; }
+            Text { text: v.name; font-size: 14px; font-weight: 700; color: Theme.fg; overflow: elide; }
             if active : Rectangle {
                 background: Theme.acc; border-radius: 9px;
                 HorizontalLayout {
@@ -104,10 +105,102 @@ component VoiceCard inherits Rectangle {
             Rectangle {}
         }
         Text { text: v.desc; font-size: 11.5px; color: Theme.dim; wrap: word-wrap; }
+        Rectangle {}  // flex spacer — push chips to the bottom
         HorizontalLayout {
             spacing: 6px; alignment: start;
             Chip { label: v.lang; }
             Chip { label: v.kind; }
+        }
+    }
+}
+
+// --- themed dropdown (replaces the std ComboBox so it matches every skin) ---
+component ThemedDropdown inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: 0;
+    callback selected(int);
+    property <bool> win95: Theme.name == "win95";
+    height: 30px;
+    border-radius: Theme.rad;
+    border-width: win95 ? 0px : 1px;
+    border-color: Theme.btn-brd;
+    background: win95 ? #ffffff : Theme.card-bg;
+    if win95 : Bevel { width: 100%; height: 100%; sunken: true; }
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 6px; spacing: 4px;
+        Text {
+            text: model[current-index]; font-size: 12px; color: Theme.fg; font-family: Theme.font;
+            vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+        }
+        Text { text: "▾"; font-size: 10px; color: Theme.dim; vertical-alignment: center; }
+    }
+    ta := TouchArea { clicked => { popup.show(); } }
+    popup := PopupWindow {
+        x: 0; y: root.height + 2px;
+        width: root.width;
+        height: min(model.length * 26px + 4px, 210px);
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: win95 ? #ffffff : Theme.card-bg;
+            border-width: win95 ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
+            if win95 : Bevel { width: 100%; height: 100%; }
+            ScrollView {
+                VerticalLayout {
+                    padding: 2px;
+                    for opt[i] in model : Rectangle {
+                        height: 26px;
+                        background: (i == current-index || ita.has-hover) ? Theme.acc-soft : transparent;
+                        ita := TouchArea {
+                            clicked => { root.current-index = i; root.selected(i); popup.close(); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px;
+                            Text {
+                                text: opt; font-size: 12px; color: Theme.fg; font-family: Theme.font;
+                                vertical-alignment: center; overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- "Kokoro Defaults" card: bundled presets collapsed behind a dropdown ---
+component KokoroCard inherits Rectangle {
+    in property <string> selected;
+    in property <bool> active;
+    in property <[string]> names;
+    in property <[string]> ids;
+    callback pick(string);
+    property <bool> win95: Theme.name == "win95";
+    border-radius: Theme.rad;
+    border-width: win95 ? 0px : 1.5px;
+    border-color: active ? Theme.acc : Theme.brd;
+    background: Theme.card-bg;
+    clip: true;
+    if win95 : Bevel { width: 100%; height: 100%; sunken: active; }
+    VerticalLayout {
+        padding: 13px; spacing: 6px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Kokoro Defaults"; font-size: 14px; font-weight: 700; color: Theme.fg; }
+            Rectangle {}
+            if active : Rectangle {
+                background: Theme.acc; border-radius: 9px;
+                HorizontalLayout {
+                    padding-left: 7px; padding-right: 7px;
+                    Text { text: "ACTIVE"; font-size: 9px; font-weight: 700; color: Theme.acc-fg; vertical-alignment: center; }
+                }
+            }
+        }
+        Text { text: names.length + " bundled preset voices"; font-size: 11.5px; color: Theme.dim; }
+        Rectangle {}  // flex spacer
+        ThemedDropdown {
+            model: names;
+            current-index: 0;
+            selected(i) => { root.pick(ids[i]); }
         }
     }
 }
@@ -120,7 +213,10 @@ export component AppWindow inherits Window {
     default-font-family: Theme.font;
 
     // --- state exposed to Rust ---
-    in property <[VoiceItem]> voices;
+    in property <[VoiceItem]> voices;   // grid items: [Kokoro card, user voices…, spacers]
+    in property <[string]> kokoro-names;
+    in property <[string]> kokoro-ids;
+    in-out property <bool> kokoro-active: true;
     in property <[HistItem]> history;
     in-out property <string> selected-voice;
     in-out property <string> text;
@@ -131,6 +227,7 @@ export component AppWindow inherits Window {
     callback generate();
     callback stop();
     callback select-voice(string);
+    callback play(int);
 
     property <string> tab: "tts";
 
@@ -236,12 +333,36 @@ export component AppWindow inherits Window {
                                 TBtn { label: "✦ Create voice"; generate: true; clicked => {} }
                             }
                             ScrollView {
-                                VerticalLayout {
-                                    spacing: 10px;
-                                    for v[i] in voices : VoiceCard {
-                                        v: v;
-                                        selected: root.selected-voice;
-                                        clicked => { root.selected-voice = v.id; root.select-voice(v.id); }
+                                // 3-column card grid (model padded to a multiple of 3 in Rust,
+                                // so exactly 3 equal columns always render)
+                                GridLayout {
+                                    spacing: 16px;
+                                    for v[i] in voices : Rectangle {
+                                        row: floor(i / 3);
+                                        col: i - floor(i / 3) * 3;
+                                        height: 162px;
+                                        if v.kind == "model-defaults" : KokoroCard {
+                                            width: 100%; height: 100%;
+                                            selected: root.selected-voice;
+                                            active: root.kokoro-active;
+                                            names: root.kokoro-names;
+                                            ids: root.kokoro-ids;
+                                            pick(id) => {
+                                                root.selected-voice = id;
+                                                root.kokoro-active = true;
+                                                root.select-voice(id);
+                                            }
+                                        }
+                                        if v.kind != "model-defaults" && v.kind != "empty" : VoiceCard {
+                                            width: 100%; height: 100%;
+                                            v: v;
+                                            selected: root.selected-voice;
+                                            clicked => {
+                                                root.selected-voice = v.id;
+                                                root.kokoro-active = false;
+                                                root.select-voice(v.id);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -250,7 +371,8 @@ export component AppWindow inherits Window {
                         // history column
                         Rectangle {
                             horizontal-stretch: 4;
-                            border-width: 1px; border-color: Theme.brd;
+                            // left divider (the mockup uses a single left border, not a box)
+                            Rectangle { x: 0; y: 0; width: 1px; height: 100%; background: Theme.brd; }
                             VerticalLayout {
                                 padding-left: 18px; spacing: 10px;
                                 Text { text: "HISTORY"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
@@ -259,20 +381,59 @@ export component AppWindow inherits Window {
                                         spacing: 8px;
                                         for h[i] in history : Rectangle {
                                             border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad; background: Theme.card-bg;
+                                            clip: true;
                                             if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
                                             VerticalLayout {
                                                 padding: 11px; spacing: 8px;
                                                 HorizontalLayout {
                                                     spacing: 9px;
-                                                    Text { text: h.voice; font-size: 12.5px; font-weight: 700; color: Theme.fg; }
-                                                    Rectangle {}
-                                                    Text { text: h.meta; font-size: 10px; font-family: Theme.mono; color: Theme.dim; }
+                                                    // round play button
+                                                    Rectangle {
+                                                        width: 28px; height: 28px;
+                                                        border-radius: Theme.name == "win95" ? 0px : 14px;
+                                                        border-width: Theme.name == "win95" ? 0px : 1px;
+                                                        border-color: Theme.btn-brd;
+                                                        background: Theme.btn-bg;
+                                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: pb.pressed; }
+                                                        pb := TouchArea { clicked => { root.play(i); } }
+                                                        Text { text: "▶"; font-size: 10px; color: Theme.btn-fg;
+                                                               horizontal-alignment: center; vertical-alignment: center; }
+                                                    }
+                                                    // voice + meta
+                                                    VerticalLayout {
+                                                        alignment: center; spacing: 1px;
+                                                        Text { text: h.voice; font-size: 12.5px; font-weight: 700; color: Theme.fg; overflow: elide; }
+                                                        Text { text: h.meta; font-size: 10px; font-family: Theme.mono; color: Theme.dim; overflow: elide; }
+                                                    }
+                                                    Rectangle {}  // flex spacer
+                                                    // mini waveform (decorative until per-clip playback lands)
+                                                    Rectangle {
+                                                        height: 22px;
+                                                        HorizontalLayout {
+                                                            spacing: 2px; alignment: end;
+                                                            for bh in [7, 12, 8, 16, 10, 18, 9, 14, 11, 17, 8, 13, 10, 15, 7, 12] : VerticalLayout {
+                                                                alignment: end;
+                                                                Rectangle { width: 3px; height: bh * 1px; border-radius: 1px; background: Theme.wave-dim; }
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                Text { text: h.text; font-size: 11.5px; color: Theme.dim; wrap: word-wrap; }
+                                                // message text, clamped to ~2 lines
+                                                Rectangle {
+                                                    height: 32px; clip: true;
+                                                    Text {
+                                                        width: 100%; text: h.text; font-size: 11.5px; color: Theme.dim;
+                                                        wrap: word-wrap; vertical-alignment: top;
+                                                    }
+                                                }
                                             }
                                         }
                                         if history.length == 0 : Text {
                                             text: "— nothing generated yet —"; font-size: 10.5px; font-family: Theme.mono;
+                                            color: Theme.dim; horizontal-alignment: center;
+                                        }
+                                        if history.length > 0 : Text {
+                                            text: "— end of history —"; font-size: 10.5px; font-family: Theme.mono;
                                             color: Theme.dim; horizontal-alignment: center;
                                         }
                                     }
