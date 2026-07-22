@@ -84,6 +84,10 @@ pub trait Engine {
     /// request id (0 if empty). The result arrives via `LlmResult`.
     fn refine_transcript(&self, text: &str) -> zbus::Result<u32>;
 
+    /// Async transcription for long files (Transcribe blocks the D-Bus reply).
+    /// Partials stream via `TranscribeProgress`; final text via `TranscribeResult`.
+    fn transcribe_file(&self, audio_path: &str) -> zbus::Result<u32>;
+
     /// Delete a reference sample.
     fn delete_sample(&self, sample_id: &str) -> zbus::Result<()>;
 
@@ -189,6 +193,14 @@ pub trait Engine {
     /// Result of a Compose/Rewrite request (empty text = failed / no personality).
     #[zbus(signal)]
     fn llm_result(&self, req_id: u32, text: String) -> zbus::Result<()>;
+
+    /// Live partial transcript while TranscribeFile decodes.
+    #[zbus(signal)]
+    fn transcribe_progress(&self, req_id: u32, partial: String) -> zbus::Result<()>;
+
+    /// Final transcript for a TranscribeFile request ("" on failure).
+    #[zbus(signal)]
+    fn transcribe_result(&self, req_id: u32, text: String) -> zbus::Result<()>;
 
     /// Model download progress: pct 0..1, status "downloading"|"done"|"error".
     #[zbus(signal)]

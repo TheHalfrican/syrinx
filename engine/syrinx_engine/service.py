@@ -52,6 +52,7 @@ class EngineInterface(ServiceInterface):
         self._model_loaded = False
         self._next_gen_id = 1
         self._next_llm_id = 1
+        self._next_tr_id = 1
         self._tasks: dict[int, asyncio.Task] = {}
         self._audio_lock = asyncio.Lock()  # only one output stream open at a time
         self._ctl: _PlayCtl | None = None  # current playback control
@@ -180,6 +181,28 @@ class EngineInterface(ServiceInterface):
     @method()
     async def Transcribe(self, audio_path: "s") -> "s":  # noqa: F821
         return await self._stt.transcribe(audio_path)
+
+    @method()
+    async def TranscribeFile(self, audio_path: "s") -> "u":  # noqa: F821
+        """Async transcription for long files — Transcribe blocks the D-Bus
+        reply (~25 s cap). Partial text streams via TranscribeProgress; the
+        final text arrives in TranscribeResult ("" on failure)."""
+        req_id = self._next_tr_id
+        self._next_tr_id += 1
+
+        async def run() -> None:
+            text = ""
+            try:
+                text = await self._stt.transcribe_stream(
+                    audio_path,
+                    on_partial=lambda t: self.TranscribeProgress(req_id, t),
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("transcribe %d failed", req_id)
+            self.TranscribeResult(req_id, text)
+
+        asyncio.create_task(run())
+        return req_id
 
     @method()
     async def ListVoices(self) -> "a(ss)":  # noqa: F821
@@ -494,6 +517,14 @@ class EngineInterface(ServiceInterface):
 
     @signal()
     def LlmResult(self, req_id, text) -> "us":
+        return [req_id, text]
+
+    @signal()
+    def TranscribeProgress(self, req_id, partial) -> "us":
+        return [req_id, partial]
+
+    @signal()
+    def TranscribeResult(self, req_id, text) -> "us":
         return [req_id, text]
 
     @signal()

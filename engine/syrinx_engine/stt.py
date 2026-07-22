@@ -59,3 +59,25 @@ class Transcriber:
         text = await asyncio.to_thread(_run)
         log.info("transcribed: %r", text[:80])
         return text
+
+    async def transcribe_stream(self, audio_path: str, on_partial=None) -> str:
+        """Transcribe a (possibly long) file, invoking ``on_partial(text_so_far)``
+        on the event loop as each segment decodes — the Transcription view shows
+        text arriving live instead of a spinner."""
+        await self.load()
+        loop = asyncio.get_running_loop()
+
+        def _run() -> str:
+            segments, _info = self._model.transcribe(
+                audio_path, language="en", vad_filter=True
+            )
+            parts = []
+            for seg in segments:
+                parts.append(seg.text.strip())
+                if on_partial is not None:
+                    loop.call_soon_threadsafe(on_partial, " ".join(parts))
+            return " ".join(parts).strip()
+
+        text = await asyncio.to_thread(_run)
+        log.info("transcribed (stream): %r", text[:80])
+        return text
