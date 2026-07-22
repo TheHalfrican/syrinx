@@ -41,6 +41,7 @@ async def play(
     ctl=None,
     on_level: Optional[Callable[[float], None]] = None,
     on_progress: Optional[Callable[[float], None]] = None,
+    volume: Optional[Callable[[], float]] = None,
 ) -> None:
     """Play float32 PCM cooperatively.
 
@@ -82,8 +83,11 @@ async def play(
                     await asyncio.sleep(0.05)
                     continue
             block = data[i : i + _BLOCK]
+            # Read the gain per block so a volume change applies mid-clip.
+            gain = np.float32(max(0.0, min(1.0, volume()))) if volume is not None else None
+            out = block if gain is None or gain == 1.0 else block * gain
             # Blocking write off the event loop so signals stay responsive.
-            await loop.run_in_executor(None, stream.write, block.reshape(-1, 1))
+            await loop.run_in_executor(None, stream.write, out.reshape(-1, 1))
             if on_level is not None and len(block):
                 on_level(float(np.sqrt(np.mean(np.square(block)))))
             if on_progress is not None:

@@ -12,11 +12,14 @@ Storage: $SYRINX_DATA_DIR/syrinx.db  (default ~/.local/share/syrinx)
 Samples: $SYRINX_DATA_DIR/profiles/<profile_id>/<sample_id>.wav
 """
 
+import json
 import os
 import shutil
 import sqlite3
+import tempfile
 import time
 import uuid
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -198,6 +201,55 @@ class ProfileStore:
         with self._conn() as c:
             c.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
         shutil.rmtree(self._profiles_dir / profile_id, ignore_errors=True)
+
+    # --- export / import ------------------------------------------------
+
+    def export_package(self, profile_id: str, dest: str) -> None:
+        """Write a portable .zip: profile.json + samples/<id>.wav (Voicebox-style)."""
+        p = self.get(profile_id)
+        if not p:
+            raise ValueError(f"unknown profile: {profile_id}")
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("profile.json", json.dumps(p.full(), indent=2))
+            for s in p.samples:
+                src = Path(s.audio_path)
+                if src.exists():
+                    z.write(src, f"samples/{s.id}.wav")
+
+    def import_package(self, src: str) -> str:
+        """Create a new profile from an exported .zip; returns the new id."""
+        with zipfile.ZipFile(src) as z:
+            meta = json.loads(z.read("profile.json"))
+            # profiles.name is UNIQUE — de-dup with a numeric suffix
+            existing = {p.name for p in self.list()}
+            base = meta.get("name") or "Imported voice"
+            name, n = base, 2
+            while name in existing:
+                name = f"{base} ({n})"
+                n += 1
+            pid = self.create(
+                name,
+                meta.get("voice_type", "cloned"),
+                language=meta.get("language", "en"),
+                description=meta.get("description", ""),
+                personality=meta.get("personality", ""),
+                default_engine=meta.get("default_engine", ""),
+                preset_engine=meta.get("preset_engine", ""),
+                preset_voice_id=meta.get("preset_voice_id", ""),
+            )
+            for s in meta.get("samples", []):
+                try:
+                    data = z.read(f"samples/{s['id']}.wav")
+                except KeyError:
+                    continue
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                    tf.write(data)
+                    tmp = tf.name
+                try:
+                    self.add_sample(pid, tmp, s.get("reference_text", ""))
+                finally:
+                    os.unlink(tmp)
+        return pid
 
     # --- samples --------------------------------------------------------
 

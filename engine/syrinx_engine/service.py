@@ -56,6 +56,7 @@ class EngineInterface(ServiceInterface):
         self._audio_lock = asyncio.Lock()  # only one output stream open at a time
         self._ctl: _PlayCtl | None = None  # current playback control
         self._play_epoch = 0               # latest playback request wins
+        self._volume = 1.0                 # playback gain 0..1 (SetVolume)
 
     @property
     def backend_name(self) -> str:
@@ -138,6 +139,7 @@ class EngineInterface(ServiceInterface):
                     pcm, rate, ctl,
                     on_level=lambda rms: self.AudioLevel(gen_id, rms),
                     on_progress=lambda p: self.PlaybackProgress(gen_id, p),
+                    volume=lambda: self._volume,
                 )
             finally:
                 if self._ctl is ctl:
@@ -213,6 +215,14 @@ class EngineInterface(ServiceInterface):
     async def DeleteProfile(self, profile_id: "s") -> None:  # noqa: F821
         self._profiles.delete(profile_id)
         self._tts.invalidate_profile(profile_id)
+
+    @method()
+    async def ExportProfile(self, profile_id: "s", dest: "s") -> None:  # noqa: F821
+        self._profiles.export_package(profile_id, dest)
+
+    @method()
+    async def ImportProfile(self, src: "s") -> "s":  # noqa: F821
+        return self._profiles.import_package(src)
 
     @method()
     async def AddSample(self, profile_id: "s", audio_path: "s", reference_text: "s") -> "s":  # noqa: F821
@@ -366,6 +376,10 @@ class EngineInterface(ServiceInterface):
     async def SeekPlayback(self, pct: "d") -> None:  # noqa: F821
         if self._ctl is not None:
             self._ctl.seek = pct
+
+    @method()
+    async def SetVolume(self, volume: "d") -> None:  # noqa: F821
+        self._volume = max(0.0, min(1.0, volume))
 
     @method()
     async def StarHistory(self, hid: "s", starred: "b") -> None:  # noqa: F821
