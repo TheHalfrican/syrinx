@@ -491,6 +491,8 @@ export component AppWindow inherits Window {
     in-out property <string> cv-language: "en";
     in-out property <int> cv-lang-index: 0;
     in-out property <string> cv-edit-id: "";   // non-empty = the modal edits this profile
+    in property <[string]> cv-model-options: ["Follow active model"];
+    in-out property <int> cv-model-index: 0;
 
     callback generate();
     callback stop();
@@ -635,7 +637,12 @@ export component AppWindow inherits Window {
                                 Text { text: "VOICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; vertical-alignment: center; }
                                 Rectangle {}
                                 TBtn { label: "Import voice"; clicked => { root.import-voice(); } }
-                                TBtn { label: "✦ Create voice"; generate: true; clicked => { cv-open = true; } }
+                                TBtn { label: "✦ Create voice"; generate: true; clicked => {
+                                    // clear any stale edit-mode state before a fresh create
+                                    cv-edit-id = ""; cv-model-index = 0;
+                                    cv-lang-index = 0; cv-language = "en";
+                                    cv-open = true;
+                                } }
                             }
                             ScrollView {
                                 // 3-column card grid (model padded to a multiple of 3 in Rust,
@@ -689,6 +696,18 @@ export component AppWindow inherits Window {
                                         spacing: 8px;
                                         Rectangle {
                                             horizontal-stretch: 1;
+                                            property <length> ctx-x;
+                                            property <length> ctx-y;
+                                            // under the input: right-clicks only (left = caret/selection)
+                                            crta := TouchArea {
+                                                pointer-event(e) => {
+                                                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                                        ctx-x = crta.mouse-x;
+                                                        ctx-y = crta.mouse-y;
+                                                        cmenu.show();
+                                                    }
+                                                }
+                                            }
                                             if root.text == "" : Text {
                                                 x: 2px; y: 2px; width: parent.width - 4px;
                                                 text: selected-voice-name == "" ? "Select a voice above…"
@@ -701,6 +720,24 @@ export component AppWindow inherits Window {
                                                 text <=> root.text;
                                                 font-size: 13.5px; color: Theme.fg; wrap: word-wrap;
                                                 single-line: false;
+                                            }
+                                            cmenu := PopupWindow {
+                                                x: parent.ctx-x; y: parent.ctx-y;
+                                                width: 150px; height: 120px;
+                                                close-policy: close-on-click-outside;
+                                                Rectangle {
+                                                    background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                                    border-width: Theme.name == "win95" ? 0px : 1px;
+                                                    border-color: Theme.brd; border-radius: Theme.rad;
+                                                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                                    VerticalLayout {
+                                                        padding: 3px;
+                                                        RowMenuItem { label: "Cut"; chosen => { ti.cut(); cmenu.close(); } }
+                                                        RowMenuItem { label: "Copy"; chosen => { ti.copy(); cmenu.close(); } }
+                                                        RowMenuItem { label: "Paste"; chosen => { ti.paste(); cmenu.close(); } }
+                                                        RowMenuItem { label: "Select all"; chosen => { ti.select-all(); cmenu.close(); } }
+                                                    }
+                                                }
                                             }
                                         }
                                         VerticalLayout {
@@ -1163,8 +1200,9 @@ export component AppWindow inherits Window {
                 // body — two columns
                 HorizontalLayout {
                     padding: 18px; spacing: 20px;
-                    // LEFT: reference audio (creation only — edit touches metadata)
-                    if cv-edit-id == "" : VerticalLayout {
+                    // LEFT: reference audio (in edit mode a new capture replaces
+                    // the profile's current sample on save)
+                    VerticalLayout {
                         horizontal-stretch: 1; spacing: 10px;
                         Text { text: "REFERENCE AUDIO"; font-size: 11px; font-weight: 700; color: Theme.dim; }
                         HorizontalLayout {
@@ -1210,6 +1248,7 @@ export component AppWindow inherits Window {
                                     text: cv-sample-label != "" ? cv-sample-label
                                         : (cv-mode == "upload" ? "Pick a .wav / .mp3 / .flac clip"
                                         : cv-mode == "system" ? "System audio — use speaker/HDMI output (Bluetooth can't be tapped)"
+                                        : cv-edit-id != "" ? "Optional — a new clip replaces the current sample"
                                         : "Record 5–30s of clear speech");
                                     font-size: 11px; font-family: Theme.mono; color: Theme.dim;
                                     horizontal-alignment: center; wrap: word-wrap;
@@ -1254,6 +1293,14 @@ export component AppWindow inherits Window {
                                 model: ["English", "Japanese", "Chinese", "German", "Spanish", "French", "Italian", "Portuguese"];
                                 current-index <=> cv-lang-index;
                                 selected(i) => { cv-language = ["en", "ja", "zh", "de", "es", "fr", "it", "pt"][i]; }
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: "DEFAULT MODEL"; font-size: 11px; font-weight: 700; color: Theme.dim; }
+                            ThemedDropdown {
+                                model: cv-model-options;
+                                current-index <=> cv-model-index;
                             }
                         }
                         Rectangle {}

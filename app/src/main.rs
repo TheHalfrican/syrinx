@@ -30,7 +30,7 @@ enum Cmd {
     CvStopRecord,
     CvPickFile,
     CvTranscribe,
-    CvCreate { name: String, desc: String, personality: String, language: String, transcript: String },
+    CvCreate { name: String, desc: String, personality: String, language: String, transcript: String, model_index: usize },
     CvCancel,
     Compose { voice_id: String, prompt: String },
     Rewrite { voice_id: String, text: String },
@@ -266,6 +266,7 @@ fn main() -> anyhow::Result<()> {
                 personality: ui.get_cv_personality().to_string(),
                 language: ui.get_cv_language().to_string(),
                 transcript: ui.get_cv_transcript().to_string(),
+                model_index: ui.get_cv_model_index() as usize,
             });
         });
     }
@@ -405,8 +406,13 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
             let (desc, lang, kind) = if let Some(p) = pmap.get(&id) {
                 let vt = p.get("voice_type").and_then(|v| v.as_str()).unwrap_or("voice");
                 let l = p.get("language").and_then(|v| v.as_str()).unwrap_or("en");
-                let d = if hp { "Has personality" } else { "Custom voice" };
-                (d.to_string(), l.to_string(), vt.to_string())
+                // the profile's own description, falling back to a kind label
+                let d = match p.get("description").and_then(|v| v.as_str()) {
+                    Some(d) if !d.trim().is_empty() => d.to_string(),
+                    _ if hp => "Has personality".to_string(),
+                    _ => "Custom voice".to_string(),
+                };
+                (d, l.to_string(), vt.to_string())
             } else {
                 (String::new(), "en".to_string(), "voice".to_string())
             };
@@ -614,16 +620,20 @@ fn hardware_line(json: &str) -> String {
 }
 
 /// Re-fetch the catalog + hardware and push into the UI. Also rebuilds the
-/// composer's engine dropdown (usable = downloaded + supported voice models);
-/// returns its model ids in dropdown order plus the active voice engine name.
-async fn refresh_models(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) -> (Vec<String>, String) {
+/// composer's engine dropdown and the modal's default-model options (usable =
+/// downloaded + supported voice models); returns (model id, engine) pairs in
+/// dropdown order plus the active voice engine name.
+async fn refresh_models(
+    ui: &slint::Weak<AppWindow>,
+    proxy: &EngineProxy<'_>,
+) -> (Vec<(String, String)>, String) {
     let models_json = proxy.list_models().await.unwrap_or_else(|_| "[]".into());
     let hw_json = proxy.hardware().await.unwrap_or_default();
     let (voice, stt, llm) = build_models(&models_json);
     let hwline = hardware_line(&hw_json);
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(&models_json).unwrap_or_default();
-    let mut eng_ids: Vec<String> = Vec::new();
+    let mut models: Vec<(String, String)> = Vec::new(); // (model id, engine)
     let mut eng_names: Vec<SharedString> = Vec::new();
     let mut active_idx: i32 = 0;
     let mut active_engine = String::from("kokoro");
@@ -632,13 +642,17 @@ async fn refresh_models(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) ->
         let b = |k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
         if s("category") == "voice" && b("downloaded") && b("supported") {
             if b("active") {
-                active_idx = eng_ids.len() as i32;
+                active_idx = models.len() as i32;
                 active_engine = s("engine").to_string();
             }
-            eng_ids.push(s("id").to_string());
+            models.push((s("id").to_string(), s("engine").to_string()));
             eng_names.push(s("display").into());
         }
     }
+    // modal picker: "Follow active model" + the same list
+    let cv_options: Vec<SharedString> = std::iter::once(SharedString::from("Follow active model"))
+        .chain(eng_names.iter().cloned())
+        .collect();
 
     ui.upgrade_in_event_loop(move |ui| {
         ui.set_voice_models(ModelRc::from(Rc::new(VecModel::from(voice))));
@@ -647,9 +661,10 @@ async fn refresh_models(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) ->
         ui.set_hardware_line(hwline.into());
         ui.set_composer_engines(ModelRc::from(Rc::new(VecModel::from(eng_names))));
         ui.set_composer_engine_index(active_idx);
+        ui.set_cv_model_options(ModelRc::from(Rc::new(VecModel::from(cv_options))));
     })
     .ok();
-    (eng_ids, active_engine)
+    (models, active_engine)
 }
 
 /// Rebuild the voice-card grid from the engine (after create/edit/delete/import).
@@ -805,7 +820,7 @@ async fn worker(
     let mut llm_res = proxy.receive_llm_result().await?;
     let mut mprog = proxy.receive_model_progress().await?;
     let mut pending_llm: u32 = 0;
-    let (mut voice_engine_ids, mut active_engine) = refresh_models(&ui, &proxy).await;
+    let (mut voice_models, mut active_engine) = refresh_models(&ui, &proxy).await;
     let mut lang_codes = update_composer_langs(&ui, "kokoro", "en");
     // effects dropdown: "No effects" + the engine's built-in presets
     let effect_ids: Vec<String> = {
@@ -832,6 +847,7 @@ async fn worker(
     let mut last_pct: f64 = 0.0;
     let mut speak_after_llm: Option<String> = None;
     let mut cv_edit: Option<String> = None;
+    let mut cv_edit_transcript = String::new();
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -888,7 +904,7 @@ async fn worker(
                         "downloading" => set_model_progress(&ui, id, a.pct as f32, true),
                         _ => { // done / error
                             let r = refresh_models(&ui, &proxy).await;
-                            voice_engine_ids = r.0;
+                            voice_models = r.0;
                             active_engine = r.1;
                         }
                     }
@@ -1115,15 +1131,59 @@ async fn worker(
                         }).ok();
                     }
                 }
-                Some(Cmd::CvCreate { name, desc, personality, language, transcript }) => {
+                Some(Cmd::CvCreate { name, desc, personality, language, transcript, model_index }) => {
+                    // "Follow active model" (index 0) stores "", else the engine
+                    // of the picked voice model — the same field the composer
+                    // dropdown pins.
+                    let default_engine = if model_index == 0 {
+                        String::new()
+                    } else {
+                        voice_models
+                            .get(model_index - 1)
+                            .map(|(_, e)| e.clone())
+                            .unwrap_or_default()
+                    };
                     if let Some(pid) = cv_edit.take() {
-                        // edit mode: patch metadata, keep samples untouched
+                        // edit mode: patch metadata + optionally replace audio
                         let patch = serde_json::json!({
                             "name": name, "description": desc,
                             "personality": personality, "language": language,
+                            "default_engine": default_engine,
                         }).to_string();
                         match proxy.update_profile(&pid, &patch).await {
                             Ok(_) => {
+                                if let Some(sample) = cv_sample.take() {
+                                    // a new capture replaces the existing samples
+                                    if let Ok(pj) = proxy.get_profile(&pid).await {
+                                        let p: serde_json::Value =
+                                            serde_json::from_str(&pj).unwrap_or_default();
+                                        for s in p.get("samples").and_then(|v| v.as_array()).into_iter().flatten() {
+                                            if let Some(sid) = s.get("id").and_then(|v| v.as_str()) {
+                                                proxy.delete_sample(sid).await.ok();
+                                            }
+                                        }
+                                    }
+                                    if let Err(e) = proxy.add_sample(&pid, &sample, &transcript).await {
+                                        tracing::error!("replace sample failed: {e}");
+                                    }
+                                } else if transcript.trim() != cv_edit_transcript.trim()
+                                    && !transcript.trim().is_empty()
+                                {
+                                    // transcript-only correction on the existing sample
+                                    if let Ok(pj) = proxy.get_profile(&pid).await {
+                                        let p: serde_json::Value =
+                                            serde_json::from_str(&pj).unwrap_or_default();
+                                        if let Some(sid) = p
+                                            .get("samples")
+                                            .and_then(|v| v.as_array())
+                                            .and_then(|a| a.first())
+                                            .and_then(|s| s.get("id"))
+                                            .and_then(|v| v.as_str())
+                                        {
+                                            proxy.update_sample_text(&pid, sid, &transcript).await.ok();
+                                        }
+                                    }
+                                }
                                 refresh_grid(&ui, &proxy).await;
                                 let pid2 = pid.clone();
                                 let name2 = name.clone();
@@ -1134,6 +1194,9 @@ async fn worker(
                                     ui.set_cv_name("".into());
                                     ui.set_cv_desc("".into());
                                     ui.set_cv_personality("".into());
+                                    ui.set_cv_transcript("".into());
+                                    ui.set_cv_sample_label("".into());
+                                    ui.set_cv_model_index(0);
                                     if ui.get_selected_voice().as_str() == pid2 {
                                         ui.set_selected_voice_name(name2.into());
                                         ui.set_selected_has_personality(hp);
@@ -1147,11 +1210,10 @@ async fn worker(
                     } else {
                         ui.upgrade_in_event_loop(|ui| ui.set_cv_creating(true)).ok();
                         let sample = cv_sample.clone().unwrap();
-                        // default_engine stays "" so the voice follows the active
-                        // clone engine (Models tab "Use"); it can be pinned later.
                         let spec = serde_json::json!({
                             "name": name, "voice_type": "cloned", "language": language,
-                            "description": desc, "personality": personality, "default_engine": "",
+                            "description": desc, "personality": personality,
+                            "default_engine": default_engine,
                         }).to_string();
                         let outcome = async {
                             let pid = proxy.create_profile(&spec).await?;
@@ -1198,13 +1260,13 @@ async fn worker(
                 Some(Cmd::DeleteModel { id }) => {
                     proxy.delete_model(&id).await.ok();
                     let r = refresh_models(&ui, &proxy).await;
-                    voice_engine_ids = r.0;
+                    voice_models = r.0;
                     active_engine = r.1;
                 }
                 Some(Cmd::ActivateModel { id }) => {
                     proxy.set_active_model(&id).await.ok();
                     let r = refresh_models(&ui, &proxy).await;
-                    voice_engine_ids = r.0;
+                    voice_models = r.0;
                     active_engine = r.1;
                 }
                 Some(Cmd::Compose { voice_id, prompt }) => {
@@ -1225,6 +1287,7 @@ async fn worker(
                     }
                     cv_sample = None;
                     cv_edit = None;
+                    cv_edit_transcript.clear();
                     ui.upgrade_in_event_loop(|ui| {
                         ui.set_cv_recording(false);
                         ui.set_cv_sample_label("".into());
@@ -1233,6 +1296,7 @@ async fn worker(
                         ui.set_cv_personality("".into());
                         ui.set_cv_transcript("".into());
                         ui.set_cv_edit_id("".into());
+                        ui.set_cv_model_index(0);
                     }).ok();
                 }
                 Some(Cmd::GenerateInCharacter { text, voice }) => {
@@ -1264,6 +1328,13 @@ async fn worker(
                         ("kokoro".to_string(), "en".to_string())
                     };
                     lang_codes = update_composer_langs(&ui, &engine, &code);
+                    // the composer's model dropdown mirrors this voice's engine
+                    // (profile pin, else the active model)
+                    let eidx = voice_models
+                        .iter()
+                        .position(|(_, e)| *e == engine)
+                        .unwrap_or(0) as i32;
+                    ui.upgrade_in_event_loop(move |ui| ui.set_composer_engine_index(eidx)).ok();
                 }
                 Some(Cmd::PickLanguage { voice, index }) => {
                     if let Some(code) = lang_codes.get(index) {
@@ -1315,20 +1386,23 @@ async fn worker(
                     }
                 }
                 Some(Cmd::PickEngine { voice, index }) => {
-                    if let Some(mid) = voice_engine_ids.get(index).cloned() {
-                        proxy.set_active_model(&mid).await.ok();
-                        let r = refresh_models(&ui, &proxy).await;
-                        voice_engine_ids = r.0;
-                        active_engine = r.1;
-                        // language subset follows the engine for unpinned clones
+                    if let Some((mid, meng)) = voice_models.get(index).cloned() {
                         if !voice.is_empty() && !voice.starts_with("builtin:") {
+                            // cloned profile selected: the dropdown pins THIS
+                            // voice's engine (same field as the edit modal)
+                            let patch = serde_json::json!({"default_engine": meng}).to_string();
+                            proxy.update_profile(&voice, &patch).await.ok();
                             if let Ok(pj) = proxy.get_profile(&voice).await {
                                 let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
-                                let de = p.get("default_engine").and_then(|v| v.as_str()).unwrap_or("");
-                                let engine = if de.is_empty() { active_engine.clone() } else { de.to_string() };
                                 let code = p.get("language").and_then(|v| v.as_str()).unwrap_or("en").to_string();
-                                lang_codes = update_composer_langs(&ui, &engine, &code);
+                                lang_codes = update_composer_langs(&ui, &meng, &code);
                             }
+                        } else {
+                            // preset selected: switch the global active voice model
+                            proxy.set_active_model(&mid).await.ok();
+                            let r = refresh_models(&ui, &proxy).await;
+                            voice_models = r.0;
+                            active_engine = r.1;
                         }
                     }
                 }
@@ -1385,13 +1459,38 @@ async fn worker(
                             .iter()
                             .position(|c| *c == lang)
                             .unwrap_or(0) as i32;
+                        // current sample transcript (edit shows/corrects it)
+                        let transcript = p
+                            .get("samples")
+                            .and_then(|v| v.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|smp| smp.get("reference_text"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        cv_edit_transcript = transcript.clone();
+                        // pinned engine → its dropdown slot; "" → Follow active
+                        let de = s("default_engine");
+                        let model_idx = if de.is_empty() {
+                            0
+                        } else {
+                            voice_models
+                                .iter()
+                                .position(|(_, e)| *e == de)
+                                .map(|i| i as i32 + 1)
+                                .unwrap_or(0)
+                        };
                         cv_edit = Some(id.clone());
+                        cv_sample = None;
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_cv_name(name.into());
                             ui.set_cv_desc(desc.into());
                             ui.set_cv_personality(pers.into());
                             ui.set_cv_language(lang.into());
                             ui.set_cv_lang_index(lang_idx);
+                            ui.set_cv_transcript(transcript.into());
+                            ui.set_cv_model_index(model_idx);
+                            ui.set_cv_sample_label("".into());
                             ui.set_cv_edit_id(id.into());
                             ui.set_cv_open(true);
                         }).ok();
