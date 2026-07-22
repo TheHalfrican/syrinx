@@ -299,6 +299,7 @@ component RowMenu inherits Rectangle {
     callback regen();
     callback export-audio();
     callback export-package();
+    callback apply-effects();
     callback del();
     property <bool> win95: Theme.name == "win95";
     width: 24px; height: 24px; border-radius: Theme.rad;
@@ -319,7 +320,7 @@ component RowMenu inherits Rectangle {
                 RowMenuItem { label: "Regenerate"; chosen => { root.regen(); pop.close(); } }
                 RowMenuItem { label: "Export audio"; chosen => { root.export-audio(); pop.close(); } }
                 RowMenuItem { label: "Export package"; chosen => { root.export-package(); pop.close(); } }
-                RowMenuItem { label: "Apply effects"; enabled: false; }
+                RowMenuItem { label: "Apply effects"; chosen => { root.apply-effects(); pop.close(); } }
                 Rectangle { height: 1px; background: Theme.brd; }
                 RowMenuItem { label: "Delete"; tint: #cc3b3b; chosen => { root.del(); pop.close(); } }
             }
@@ -437,12 +438,17 @@ export component AppWindow inherits Window {
     in-out property <int> composer-lang-index: 0;
     in property <[string]> composer-engines;
     in-out property <int> composer-engine-index: 0;
-    in property <[string]> composer-effects: ["No effects", "Robotic · soon", "Radio · soon", "Echo Chamber · soon", "Deep Voice · soon"];
+    in property <[string]> composer-effects: ["No effects"];
     in-out property <int> composer-effect-index: 0;
     in-out property <bool> persona-on: false;   // "speak in character" toggle
+    in-out property <string> gen-error: "";     // last generation failure (cleared on Generate)
     // --- delete-voice confirm ---
     in-out property <string> del-id: "";
     in-out property <string> del-name: "";
+    // --- apply-effects-to-history dialog ---
+    in-out property <string> fx-id: "";
+    in-out property <string> fx-voice: "";
+    in-out property <int> fx-index: 0;
     // --- models tab ---
     in property <[ModelItem]> voice-models;
     in property <[ModelItem]> stt-models;
@@ -501,6 +507,8 @@ export component AppWindow inherits Window {
     callback cv-cancel();
     callback pick-language(int);
     callback pick-engine(int);
+    callback pick-effect(int);
+    callback apply-fx(string, int);  // history id, effect dropdown index
     callback toggle-loop(bool);
     callback set-volume(float);
     callback export-voice(string, string);  // id, name
@@ -710,6 +718,12 @@ export component AppWindow inherits Window {
                                             x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
                                         }
                                     }
+                                    // last generation failure (cleared on the next Generate)
+                                    if gen-error != "" : Text {
+                                        text: "⚠ " + gen-error;
+                                        font-size: 10px; font-family: Theme.mono; color: #cc3b3b;
+                                        overflow: elide;
+                                    }
                                     // language / engine / effects (Voicebox dropdown row; opens upward)
                                     HorizontalLayout {
                                         spacing: 8px;
@@ -729,6 +743,7 @@ export component AppWindow inherits Window {
                                             up: true; horizontal-stretch: 1;
                                             model: composer-effects;
                                             current-index <=> composer-effect-index;
+                                            selected(i) => { root.pick-effect(i); }
                                         }
                                     }
                                 }
@@ -917,6 +932,7 @@ export component AppWindow inherits Window {
                                                         regen => { root.regen-hist(h.id); }
                                                         export-audio => { root.export-audio(h.id); }
                                                         export-package => { root.export-package(h.id); }
+                                                        apply-effects => { root.fx-id = h.id; root.fx-voice = h.voice; root.fx-index = 0; }
                                                         del => { root.delete-hist(h.id); }
                                                     }
                                                 }
@@ -1200,6 +1216,47 @@ export component AppWindow inherits Window {
                                  : (cv-creating ? "Creating…" : "✦ Create voice");
                             generate: true; min-width: 150px;
                             clicked => { root.cv-create(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- apply-effects-to-history dialog ---
+    if fx-id != "" : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 380px; height: 176px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px; clip: true;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                Text { text: "Apply effects"; font-size: 15px; font-weight: 700; color: Theme.fg; }
+                Text {
+                    text: "Process \"" + fx-voice + "\" with a preset. The result is saved as a new history clip.";
+                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
+                }
+                ThemedDropdown {
+                    model: composer-effects;
+                    current-index <=> fx-index;
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    spacing: 10px; alignment: end;
+                    TBtn { label: "Cancel"; clicked => { fx-id = ""; } }
+                    TBtn {
+                        label: "✦ Apply"; generate: true; min-width: 110px;
+                        clicked => {
+                            if (fx-index > 0) {
+                                root.apply-fx(fx-id, fx-index);
+                                fx-id = "";
+                            }
                         }
                     }
                 }

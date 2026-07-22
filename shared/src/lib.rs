@@ -102,6 +102,17 @@ pub trait Engine {
     /// Playback volume 0..1, applied live to the current and later clips.
     fn set_volume(&self, volume: f64) -> zbus::Result<()>;
 
+    // --- effects (pedalboard post-processing) ----------------------------
+
+    /// JSON list of built-in effect presets: [{id, name, description}].
+    fn list_effect_presets(&self) -> zbus::Result<String>;
+
+    /// Set the preset applied to subsequent generations ("" = none).
+    fn set_effect(&self, preset_id: &str) -> zbus::Result<()>;
+
+    /// Re-process a history clip through a preset; returns the new history id.
+    fn apply_history_effects(&self, hid: &str, preset_id: &str) -> zbus::Result<String>;
+
     /// Star/unstar a history entry.
     fn star_history(&self, hid: &str, starred: bool) -> zbus::Result<()>;
 

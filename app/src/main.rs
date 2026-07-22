@@ -44,6 +44,8 @@ enum Cmd {
     PickEngine { voice: String, index: usize },
     ToggleLoop { on: bool },
     SetVol { v: f64 },
+    PickEffect { index: usize },
+    ApplyFx { hid: String, index: usize },
     ExportVoice { id: String, name: String },
     EditVoice { id: String },
     DeleteVoice { id: String },
@@ -73,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             }
             ui.set_generating(true);
             ui.set_synthesizing(true);
+            ui.set_gen_error("".into());
             history.insert(
                 0,
                 HistItem {
@@ -297,6 +300,16 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_toggle_loop(move |on| { let _ = tx.send(Cmd::ToggleLoop { on }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_pick_effect(move |i| { let _ = tx.send(Cmd::PickEffect { index: i as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_apply_fx(move |hid, i| {
+            let _ = tx.send(Cmd::ApplyFx { hid: hid.to_string(), index: i as usize });
+        });
     }
     {
         let tx = tx.clone();
@@ -749,6 +762,7 @@ async fn worker(
     }
 
     let mut levels = proxy.receive_audio_level().await?;
+    let mut gprog = proxy.receive_generation_progress().await?;
     let mut ended = proxy.receive_speak_ended().await?;
     let mut pinfo = proxy.receive_playback_info().await?;
     let mut pprog = proxy.receive_playback_progress().await?;
@@ -757,6 +771,21 @@ async fn worker(
     let mut pending_llm: u32 = 0;
     let (mut voice_engine_ids, mut active_engine) = refresh_models(&ui, &proxy).await;
     let mut lang_codes = update_composer_langs(&ui, "kokoro", "en");
+    // effects dropdown: "No effects" + the engine's built-in presets
+    let effect_ids: Vec<String> = {
+        let fx_json = proxy.list_effect_presets().await.unwrap_or_else(|_| "[]".into());
+        let fx: Vec<serde_json::Value> = serde_json::from_str(&fx_json).unwrap_or_default();
+        let mut labels: Vec<SharedString> = vec!["No effects".into()];
+        let mut ids = vec![String::new()];
+        for p in &fx {
+            labels.push(p.get("name").and_then(|v| v.as_str()).unwrap_or("").into());
+            ids.push(p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string());
+        }
+        ui.upgrade_in_event_loop(move |ui| {
+            ui.set_composer_effects(ModelRc::from(Rc::new(VecModel::from(labels))));
+        }).ok();
+        ids
+    };
     let mut current_gen: u32 = 0;
     let mut player_dur: f64 = 0.0;
     let mut current_play_gen: u32 = 0;
@@ -781,6 +810,14 @@ async fn worker(
                 if let Ok(a) = sig.args() {
                     let rms = a.rms as f32;
                     ui.upgrade_in_event_loop(move |ui| ui.set_level(rms)).ok();
+                }
+            }
+            Some(sig) = gprog.next() => {
+                if let Ok(a) = sig.args() {
+                    if let Some(msg) = a.state.strip_prefix("error:") {
+                        let msg = msg.trim().to_string();
+                        ui.upgrade_in_event_loop(move |ui| ui.set_gen_error(msg.into())).ok();
+                    }
                 }
             }
             Some(sig) = pinfo.next() => {
@@ -1217,6 +1254,25 @@ async fn worker(
                 }
                 Some(Cmd::ToggleLoop { on }) => { loop_on = on; }
                 Some(Cmd::SetVol { v }) => { proxy.set_volume(v).await.ok(); }
+                Some(Cmd::PickEffect { index }) => {
+                    if let Some(pid) = effect_ids.get(index) {
+                        proxy.set_effect(pid).await.ok();
+                    }
+                }
+                Some(Cmd::ApplyFx { hid, index }) => {
+                    if let Some(pid) = effect_ids.get(index).filter(|p| !p.is_empty()) {
+                        match proxy.apply_history_effects(&hid, pid).await {
+                            Ok(new_id) if !new_id.is_empty() => {
+                                if let Ok(j) = proxy.list_history().await {
+                                    let items = build_history(&j);
+                                    ui.upgrade_in_event_loop(move |ui| set_history_model(&ui, items)).ok();
+                                }
+                            }
+                            Ok(_) => tracing::error!("apply effects: engine returned no clip"),
+                            Err(e) => tracing::error!("apply effects failed: {e}"),
+                        }
+                    }
+                }
                 Some(Cmd::ExportVoice { id, name }) => {
                     let safe: String = name
                         .to_lowercase()
