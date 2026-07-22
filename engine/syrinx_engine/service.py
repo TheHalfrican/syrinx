@@ -268,9 +268,16 @@ class EngineInterface(ServiceInterface):
             return 0
         return self._start_llm("rewrite", personality, text)
 
+    @method()
+    async def RefineTranscript(self, text: "s") -> "u":  # noqa: F821
+        """Clean a dictation transcript via the LLM; result via LlmResult."""
+        if not text.strip():
+            return 0
+        return self._start_llm("refine", "", text)
+
     def _start_llm(self, kind: str, personality: str, text: str) -> int:
-        """Run compose/rewrite off the D-Bus call (LLM load + inference is slow);
-        deliver the result via the LlmResult signal, keyed by req_id."""
+        """Run compose/rewrite/refine off the D-Bus call (LLM load + inference
+        is slow); deliver the result via the LlmResult signal, keyed by req_id."""
         req_id = self._next_llm_id
         self._next_llm_id += 1
 
@@ -279,6 +286,8 @@ class EngineInterface(ServiceInterface):
             try:
                 if kind == "compose":
                     out = await self._llm.compose(personality, text)
+                elif kind == "refine":
+                    out = await self._llm.refine(text)
                 else:
                     out = await self._llm.rewrite(personality, text)
             except Exception:  # noqa: BLE001
