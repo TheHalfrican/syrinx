@@ -35,9 +35,15 @@ component NavIcon inherits Rectangle {
     in property <string> glyph;
     in property <bool> active;
     callback clicked;
+    // The rail renders under the main panel, so tooltips can't be drawn here —
+    // report hover + window-y and let AppWindow's overlay draw them on top.
+    callback hover-changed(bool, length);
     width: 42px; height: 42px; border-radius: Theme.rad;
     background: active ? Theme.acc : (ta.has-hover ? Theme.acc-soft : transparent);
-    ta := TouchArea { clicked => { root.clicked(); } }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        changed has-hover => { root.hover-changed(self.has-hover, root.absolute-position.y); }
+    }
     Text {
         text: glyph; font-size: 18px;
         color: active ? Theme.acc-fg : Theme.dim;
@@ -148,7 +154,7 @@ component VoiceCard inherits Rectangle {
     border-width: win95 ? 0px : 1.5px;
     border-color: active ? Theme.acc : (ta.has-hover ? Theme.acc : Theme.brd);
     background: Theme.card-bg;
-    clip: true;
+    // no clip: rounded clip forces a blurry offscreen layer (content is padded anyway)
     ta := TouchArea { clicked => { root.clicked(); } }
     if win95 : Bevel { width: 100%; height: 100%; sunken: active; }
     VerticalLayout {
@@ -247,7 +253,6 @@ component KokoroCard inherits Rectangle {
     border-width: win95 ? 0px : 1.5px;
     border-color: active ? Theme.acc : (cta.has-hover ? Theme.acc : Theme.brd);
     background: Theme.card-bg;
-    clip: true;
     if win95 : Bevel { width: 100%; height: 100%; sunken: active; }
     // click anywhere but the dropdown to (re)select the current preset
     cta := TouchArea { clicked => { root.pick(ids[dd.current-index]); } }
@@ -442,6 +447,9 @@ export component AppWindow inherits Window {
     in-out property <int> composer-effect-index: 0;
     in-out property <bool> persona-on: false;   // "speak in character" toggle
     in-out property <string> gen-error: "";     // last generation failure (cleared on Generate)
+    // --- navbar tooltip overlay (drawn window-level, above the main panel) ---
+    in-out property <string> nav-tip: "";
+    in-out property <length> nav-tip-y: 0px;
     // --- delete-voice confirm ---
     in-out property <string> del-id: "";
     in-out property <string> del-name: "";
@@ -553,14 +561,21 @@ export component AppWindow inherits Window {
                 border-width: 1px; border-color: Theme.brd;
                 VerticalLayout {
                     padding-top: 12px; padding-bottom: 12px; spacing: 4px; alignment: start;
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "▷"; active: tab == "tts"; clicked => { tab = "tts"; } } }
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "◍"; active: tab == "voices"; clicked => { tab = "voices"; } } }
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "☰"; active: tab == "stt"; clicked => { tab = "stt"; } } }
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "⇄"; active: tab == "vc"; clicked => { tab = "vc"; } } }
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "▤"; active: tab == "lib"; clicked => { tab = "lib"; } } }
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "◈"; active: tab == "models"; clicked => { tab = "models"; } } }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "▷"; active: tab == "tts"; clicked => { tab = "tts"; }
+                        hover-changed(on, y) => { nav-tip = on ? "Text to Speech" : ""; nav-tip-y = y; } } }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "◍"; active: tab == "voices"; clicked => { tab = "voices"; }
+                        hover-changed(on, y) => { nav-tip = on ? "Voices" : ""; nav-tip-y = y; } } }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "☰"; active: tab == "stt"; clicked => { tab = "stt"; }
+                        hover-changed(on, y) => { nav-tip = on ? "Transcription" : ""; nav-tip-y = y; } } }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "⇄"; active: tab == "vc"; clicked => { tab = "vc"; }
+                        hover-changed(on, y) => { nav-tip = on ? "Voice Changer" : ""; nav-tip-y = y; } } }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "▤"; active: tab == "lib"; clicked => { tab = "lib"; }
+                        hover-changed(on, y) => { nav-tip = on ? "Library" : ""; nav-tip-y = y; } } }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "◈"; active: tab == "models"; clicked => { tab = "models"; }
+                        hover-changed(on, y) => { nav-tip = on ? "Models" : ""; nav-tip-y = y; } } }
                     Rectangle {}
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "⚙"; active: tab == "settings"; clicked => { tab = "settings"; } } }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "⚙"; active: tab == "settings"; clicked => { tab = "settings"; }
+                        hover-changed(on, y) => { nav-tip = on ? "Settings" : ""; nav-tip-y = y; } } }
                 }
             }
 
@@ -885,7 +900,6 @@ export component AppWindow inherits Window {
                                             // squeezing cards into each other as history grows
                                             height: 106px;
                                             border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad; background: Theme.card-bg;
-                                            clip: true;
                                             if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
                                             VerticalLayout {
                                                 padding: 11px; spacing: 8px;
@@ -1068,6 +1082,31 @@ export component AppWindow inherits Window {
             }
         }
     }
+
+    // navbar tooltip overlay — drawn here so it floats above the main panel
+    navtip := Rectangle {
+        x: 68px;
+        y: nav-tip-y + 10px;
+        height: 22px;
+        width: ntl.preferred-width + 14px;
+        opacity: 0;
+        background: Theme.name == "win95" ? #ffffe1 : #10151be6;
+        border-width: 1px; border-color: Theme.name == "win95" ? #000000 : #ffffff33;
+        border-radius: Theme.name == "win95" ? 0px : 4px;
+        ntl := Text {
+            x: 7px; height: 100%;
+            text: nav-tip; font-size: 10px; font-family: Theme.font;
+            color: Theme.name == "win95" ? #000000 : #ffffff;
+            vertical-alignment: center;
+        }
+    }
+    states [
+        nav-tip-shown when nav-tip != "" : {
+            navtip.opacity: 1;
+            in { animate navtip.opacity { duration: 100ms; delay: 1200ms; } }
+            out { animate navtip.opacity { duration: 80ms; } }
+        }
+    ]
 
     // Win95 raised window frame (outermost 3D border)
     if Theme.name == "win95" : Bevel { x: 0; y: 0; width: root.width; height: root.height; }
