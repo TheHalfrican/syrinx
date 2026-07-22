@@ -50,6 +50,8 @@ enum Cmd {
     EditVoice { id: String },
     DeleteVoice { id: String },
     ImportVoice,
+    CvPickAvatar,
+    CvStageAvatar { path: String, sx: i32, sy: i32, side: i32 },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -332,6 +334,31 @@ fn main() -> anyhow::Result<()> {
     }
     {
         let tx = tx.clone();
+        ui.on_cv_pick_avatar(move || { let _ = tx.send(Cmd::CvPickAvatar); });
+    }
+    // Crop accepted: turn the dialog's zoom/pan into a square source-pixel rect.
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_crop_done(move |accepted| {
+            if !accepted {
+                return;
+            }
+            let ui = ui_weak.unwrap();
+            let path = ui.get_crop_path().to_string();
+            let sz = ui.get_crop_src().size();
+            let (w, h) = (sz.width as f32, sz.height as f32);
+            if path.is_empty() || w < 1.0 || h < 1.0 {
+                return;
+            }
+            let side = (w.min(h) / ui.get_crop_zoom().max(1.0)).round();
+            let sx = (ui.get_crop_cx() * w - side / 2.0).clamp(0.0, (w - side).max(0.0)).round() as i32;
+            let sy = (ui.get_crop_cy() * h - side / 2.0).clamp(0.0, (h - side).max(0.0)).round() as i32;
+            let _ = tx.send(Cmd::CvStageAvatar { path, sx, sy, side: side as i32 });
+        });
+    }
+    {
+        let tx = tx.clone();
         ui.on_import_voice(move || { let _ = tx.send(Cmd::ImportVoice); });
     }
 
@@ -371,8 +398,53 @@ fn voice_name(ui: &AppWindow, id: &str) -> String {
 
 /// The voices grid, split for the UI: bundled presets collapse into the Kokoro
 /// dropdown; user-created profiles become individual cards.
+/// Send-able grid entry — slint's `image` type isn't Send, so the worker builds
+/// these and the UI thread converts them (loading avatar files) in
+/// `to_voice_items`.
+#[derive(Clone, Default)]
+struct VoiceData {
+    id: String,
+    name: String,
+    desc: String,
+    lang: String,
+    kind: String,
+    has_personality: bool,
+    avatar_path: String,
+    avatar_sx: i32,
+    avatar_sy: i32,
+    avatar_side: i32,
+}
+
+/// UI-thread conversion: load each avatar photo and build the model rows.
+fn to_voice_items(data: Vec<VoiceData>) -> Vec<VoiceItem> {
+    data.into_iter()
+        .map(|d| {
+            let (avatar, side) = if !d.avatar_path.is_empty() && d.avatar_side > 0 {
+                match slint::Image::load_from_path(std::path::Path::new(&d.avatar_path)) {
+                    Ok(img) => (img, d.avatar_side),
+                    Err(_) => (Default::default(), 0),
+                }
+            } else {
+                (Default::default(), 0)
+            };
+            VoiceItem {
+                id: d.id.into(),
+                name: d.name.into(),
+                desc: d.desc.into(),
+                lang: d.lang.into(),
+                kind: d.kind.into(),
+                has_personality: d.has_personality,
+                avatar,
+                avatar_sx: d.avatar_sx,
+                avatar_sy: d.avatar_sy,
+                avatar_side: side,
+            }
+        })
+        .collect()
+}
+
 struct GridData {
-    grid: Vec<VoiceItem>,          // [Kokoro card, user voices…, spacer padding]
+    grid: Vec<VoiceData>,          // [Kokoro card, user voices…, spacer padding]
     kokoro_names: Vec<SharedString>,
     kokoro_ids: Vec<SharedString>,
     default_selected: String,      // a bundled voice, so generation works out of the box
@@ -391,7 +463,7 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
 
     let mut kokoro_names: Vec<SharedString> = Vec::new();
     let mut kokoro_ids: Vec<SharedString> = Vec::new();
-    let mut users: Vec<VoiceItem> = Vec::new();
+    let mut users: Vec<VoiceData> = Vec::new();
 
     for (id, name) in raw {
         if id.starts_with("builtin:") {
@@ -403,7 +475,7 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
                 .and_then(|p| p.get("has_personality"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let (desc, lang, kind) = if let Some(p) = pmap.get(&id) {
+            let (desc, lang, kind, avatar_path, asx, asy, aside) = if let Some(p) = pmap.get(&id) {
                 let vt = p.get("voice_type").and_then(|v| v.as_str()).unwrap_or("voice");
                 let l = p.get("language").and_then(|v| v.as_str()).unwrap_or("en");
                 // the profile's own description, falling back to a kind label
@@ -412,41 +484,48 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
                     _ if hp => "Has personality".to_string(),
                     _ => "Custom voice".to_string(),
                 };
-                (d, l.to_string(), vt.to_string())
+                let i = |k: &str| p.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                (
+                    d,
+                    l.to_string(),
+                    vt.to_string(),
+                    p.get("avatar_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    i("avatar_sx"),
+                    i("avatar_sy"),
+                    i("avatar_side"),
+                )
             } else {
-                (String::new(), "en".to_string(), "voice".to_string())
+                (String::new(), "en".to_string(), "voice".to_string(), String::new(), 0, 0, 0)
             };
-            users.push(VoiceItem {
-                id: id.into(),
-                name: name.into(),
-                desc: desc.into(),
-                lang: lang.into(),
-                kind: kind.into(),
+            users.push(VoiceData {
+                id,
+                name,
+                desc,
+                lang,
+                kind,
                 has_personality: hp,
+                avatar_path,
+                avatar_sx: asx,
+                avatar_sy: asy,
+                avatar_side: aside,
             });
         }
     }
 
     // grid = Kokoro Defaults card + user cards, padded to a multiple of 3 with
     // invisible spacers so the 3-column GridLayout always has full first row.
-    let mut grid: Vec<VoiceItem> = Vec::with_capacity(users.len() + 3);
-    grid.push(VoiceItem {
+    let mut grid: Vec<VoiceData> = Vec::with_capacity(users.len() + 3);
+    grid.push(VoiceData {
         id: "__kokoro__".into(),
         name: "Kokoro Defaults".into(),
-        desc: "".into(),
-        lang: "".into(),
         kind: "model-defaults".into(),
-        has_personality: false,
+        ..Default::default()
     });
     grid.extend(users);
     while grid.len() % 3 != 0 {
-        grid.push(VoiceItem {
-            id: "".into(),
-            name: "".into(),
-            desc: "".into(),
-            lang: "".into(),
+        grid.push(VoiceData {
             kind: "empty".into(),
-            has_personality: false,
+            ..Default::default()
         });
     }
 
@@ -673,7 +752,7 @@ async fn refresh_grid(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) {
     let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
     let GridData { grid, .. } = build_grid(raw, &pj);
     ui.upgrade_in_event_loop(move |ui| {
-        ui.set_voices(ModelRc::from(Rc::new(VecModel::from(grid))));
+        ui.set_voices(ModelRc::from(Rc::new(VecModel::from(to_voice_items(grid)))));
     })
     .ok();
 }
@@ -802,7 +881,7 @@ async fn worker(
             ui.set_backend(backend.into());
             ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(kokoro_names))));
             ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
-            ui.set_voices(ModelRc::from(Rc::new(VecModel::from(grid))));
+            ui.set_voices(ModelRc::from(Rc::new(VecModel::from(to_voice_items(grid)))));
             if ui.get_selected_voice().is_empty() {
                 ui.set_selected_voice(default_selected.clone().into());
                 ui.set_selected_voice_name(voice_name(&ui, &default_selected).into());
@@ -848,6 +927,7 @@ async fn worker(
     let mut speak_after_llm: Option<String> = None;
     let mut cv_edit: Option<String> = None;
     let mut cv_edit_transcript = String::new();
+    let mut cv_avatar: Option<(String, i32, i32, i32)> = None; // staged (path, sx, sy, side)
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -1152,6 +1232,9 @@ async fn worker(
                         }).to_string();
                         match proxy.update_profile(&pid, &patch).await {
                             Ok(_) => {
+                                if let Some((path, asx, asy, aside)) = cv_avatar.take() {
+                                    proxy.set_profile_avatar(&pid, &path, asx, asy, aside).await.ok();
+                                }
                                 if let Some(sample) = cv_sample.take() {
                                     // a new capture replaces the existing samples
                                     if let Ok(pj) = proxy.get_profile(&pid).await {
@@ -1197,6 +1280,7 @@ async fn worker(
                                     ui.set_cv_transcript("".into());
                                     ui.set_cv_sample_label("".into());
                                     ui.set_cv_model_index(0);
+                                    ui.set_cv_avatar_side(0);
                                     if ui.get_selected_voice().as_str() == pid2 {
                                         ui.set_selected_voice_name(name2.into());
                                         ui.set_selected_has_personality(hp);
@@ -1218,10 +1302,13 @@ async fn worker(
                         let outcome = async {
                             let pid = proxy.create_profile(&spec).await?;
                             proxy.add_sample(&pid, &sample, &transcript).await?;
-                            zbus::Result::Ok(())
+                            zbus::Result::Ok(pid)
                         }.await;
                         match outcome {
-                            Ok(_) => {
+                            Ok(pid) => {
+                                if let Some((path, asx, asy, aside)) = cv_avatar.take() {
+                                    proxy.set_profile_avatar(&pid, &path, asx, asy, aside).await.ok();
+                                }
                                 let raw = proxy.list_voices().await.unwrap_or_default();
                                 let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
                                 let GridData { grid, kokoro_names, kokoro_ids, .. } = build_grid(raw, &pj);
@@ -1239,9 +1326,11 @@ async fn worker(
                                     ui.set_cv_personality("".into());
                                     ui.set_cv_transcript("".into());
                                     ui.set_cv_sample_label("".into());
+                                    ui.set_cv_model_index(0);
+                                    ui.set_cv_avatar_side(0);
                                     ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(kokoro_names))));
                                     ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
-                                    ui.set_voices(ModelRc::from(Rc::new(VecModel::from(grid))));
+                                    ui.set_voices(ModelRc::from(Rc::new(VecModel::from(to_voice_items(grid)))));
                                 }).ok();
                             }
                             Err(e) => {
@@ -1288,6 +1377,7 @@ async fn worker(
                     cv_sample = None;
                     cv_edit = None;
                     cv_edit_transcript.clear();
+                    cv_avatar = None;
                     ui.upgrade_in_event_loop(|ui| {
                         ui.set_cv_recording(false);
                         ui.set_cv_sample_label("".into());
@@ -1297,6 +1387,7 @@ async fn worker(
                         ui.set_cv_transcript("".into());
                         ui.set_cv_edit_id("".into());
                         ui.set_cv_model_index(0);
+                        ui.set_cv_avatar_side(0);
                     }).ok();
                 }
                 Some(Cmd::GenerateInCharacter { text, voice }) => {
@@ -1480,8 +1571,14 @@ async fn worker(
                                 .map(|i| i as i32 + 1)
                                 .unwrap_or(0)
                         };
+                        // existing avatar for the modal preview
+                        let av_path = s("avatar_path");
+                        let iv = |k: &str| p.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                        let (av_sx, av_sy, av_side) =
+                            (iv("avatar_sx"), iv("avatar_sy"), iv("avatar_side"));
                         cv_edit = Some(id.clone());
                         cv_sample = None;
+                        cv_avatar = None;
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_cv_name(name.into());
                             ui.set_cv_desc(desc.into());
@@ -1491,6 +1588,19 @@ async fn worker(
                             ui.set_cv_transcript(transcript.into());
                             ui.set_cv_model_index(model_idx);
                             ui.set_cv_sample_label("".into());
+                            if av_side > 0 && !av_path.is_empty() {
+                                match slint::Image::load_from_path(std::path::Path::new(&av_path)) {
+                                    Ok(img) => {
+                                        ui.set_cv_avatar(img);
+                                        ui.set_cv_avatar_sx(av_sx);
+                                        ui.set_cv_avatar_sy(av_sy);
+                                        ui.set_cv_avatar_side(av_side);
+                                    }
+                                    Err(_) => ui.set_cv_avatar_side(0),
+                                }
+                            } else {
+                                ui.set_cv_avatar_side(0);
+                            }
                             ui.set_cv_edit_id(id.into());
                             ui.set_cv_open(true);
                         }).ok();
@@ -1514,6 +1624,39 @@ async fn worker(
                         }
                         Err(e) => tracing::error!("delete voice failed: {e}"),
                     }
+                }
+                Some(Cmd::CvPickAvatar) => {
+                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
+                        .pick_file()
+                        .await
+                    {
+                        let path = handle.path().to_string_lossy().to_string();
+                        ui.upgrade_in_event_loop(move |ui| {
+                            match slint::Image::load_from_path(std::path::Path::new(&path)) {
+                                Ok(img) => {
+                                    ui.set_crop_src(img);
+                                    ui.set_crop_path(path.into());
+                                    ui.set_crop_zoom(1.0);
+                                    ui.set_crop_cx(0.5);
+                                    ui.set_crop_cy(0.5);
+                                    ui.set_crop_open(true);
+                                }
+                                Err(e) => tracing::error!("could not load image: {e}"),
+                            }
+                        }).ok();
+                    }
+                }
+                Some(Cmd::CvStageAvatar { path, sx, sy, side }) => {
+                    cv_avatar = Some((path.clone(), sx, sy, side));
+                    ui.upgrade_in_event_loop(move |ui| {
+                        if let Ok(img) = slint::Image::load_from_path(std::path::Path::new(&path)) {
+                            ui.set_cv_avatar(img);
+                            ui.set_cv_avatar_sx(sx);
+                            ui.set_cv_avatar_sy(sy);
+                            ui.set_cv_avatar_side(side);
+                        }
+                    }).ok();
                 }
                 Some(Cmd::ImportVoice) => {
                     if let Some(handle) = rfd::AsyncFileDialog::new()

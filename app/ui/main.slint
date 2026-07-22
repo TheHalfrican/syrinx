@@ -2,7 +2,11 @@
 import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 
-export struct VoiceItem { id: string, name: string, desc: string, lang: string, kind: string, has-personality: bool }
+export struct VoiceItem {
+    id: string, name: string, desc: string, lang: string, kind: string, has-personality: bool,
+    // avatar photo + its square crop rect in source pixels (side 0 = none)
+    avatar: image, avatar-sx: int, avatar-sy: int, avatar-side: int,
+}
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
 export struct ModelItem {
     id: string, display: string, size-label: string, description: string,
@@ -161,15 +165,31 @@ component VoiceCard inherits Rectangle {
         padding: 13px; spacing: 4px;
         HorizontalLayout {
             spacing: 8px;
-            Text { text: v.name; font-size: 14px; font-weight: 700; color: Theme.fg; overflow: elide; }
+            Text { text: v.name; font-size: 14px; font-weight: 700; color: Theme.fg; overflow: elide; vertical-alignment: center; }
             if active : Rectangle {
-                background: Theme.acc; border-radius: 9px;
+                background: Theme.acc; border-radius: 9px; height: 18px;
+                y: 8px;
                 HorizontalLayout {
                     padding-left: 7px; padding-right: 7px;
                     Text { text: "ACTIVE"; font-size: 9px; font-weight: 700; color: Theme.acc-fg; vertical-alignment: center; }
                 }
             }
             Rectangle {}
+            // circular avatar (the same source-clip crop the editor chose)
+            if v.avatar-side > 0 : Rectangle {
+                width: 34px; height: 34px; border-radius: 17px;
+                border-width: 1px; border-color: Theme.brd;
+                clip: true;
+                Image {
+                    width: 100%; height: 100%;
+                    source: v.avatar;
+                    image-fit: fill;
+                    source-clip-x: v.avatar-sx;
+                    source-clip-y: v.avatar-sy;
+                    source-clip-width: v.avatar-side;
+                    source-clip-height: v.avatar-side;
+                }
+            }
         }
         Text { text: v.desc; font-size: 11.5px; color: Theme.dim; wrap: word-wrap; }
         Rectangle {}  // flex spacer — push chips to the bottom
@@ -493,6 +513,18 @@ export component AppWindow inherits Window {
     in-out property <string> cv-edit-id: "";   // non-empty = the modal edits this profile
     in property <[string]> cv-model-options: ["Follow active model"];
     in-out property <int> cv-model-index: 0;
+    // avatar preview in the modal (staged or existing)
+    in-out property <image> cv-avatar;
+    in-out property <int> cv-avatar-sx: 0;
+    in-out property <int> cv-avatar-sy: 0;
+    in-out property <int> cv-avatar-side: 0;
+    // --- avatar crop dialog (zoom + pan into the circle) ---
+    in-out property <bool> crop-open: false;
+    in-out property <image> crop-src;
+    in-out property <string> crop-path: "";
+    in-out property <float> crop-zoom: 1.0;   // 1..4
+    in-out property <float> crop-cx: 0.5;     // crop centre in source UV
+    in-out property <float> crop-cy: 0.5;
 
     callback generate();
     callback stop();
@@ -520,6 +552,8 @@ export component AppWindow inherits Window {
     callback pick-language(int);
     callback pick-engine(int);
     callback pick-effect(int);
+    callback cv-pick-avatar();
+    callback crop-done(bool);   // accepted?
     callback apply-fx(string, int);  // history id, effect dropdown index
     callback toggle-loop(bool);
     callback set-volume(float);
@@ -641,6 +675,7 @@ export component AppWindow inherits Window {
                                     // clear any stale edit-mode state before a fresh create
                                     cv-edit-id = ""; cv-model-index = 0;
                                     cv-lang-index = 0; cv-language = "en";
+                                    cv-avatar-side = 0;
                                     cv-open = true;
                                 } }
                             }
@@ -1283,6 +1318,34 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         horizontal-stretch: 1; spacing: 12px;
                         Text { text: "VOICE DETAILS"; font-size: 11px; font-weight: 700; color: Theme.dim; }
+                        // avatar: circular preview + picker
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Rectangle {
+                                width: 44px; height: 44px; border-radius: 22px;
+                                border-width: 1px; border-color: Theme.brd;
+                                background: Theme.chip-bg;
+                                clip: true;
+                                if cv-avatar-side > 0 : Image {
+                                    width: 100%; height: 100%;
+                                    source: cv-avatar;
+                                    image-fit: fill;
+                                    source-clip-x: cv-avatar-sx;
+                                    source-clip-y: cv-avatar-sy;
+                                    source-clip-width: cv-avatar-side;
+                                    source-clip-height: cv-avatar-side;
+                                }
+                                if cv-avatar-side == 0 : Text {
+                                    text: "◍"; font-size: 18px; color: Theme.dim;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                TBtn { label: "Choose photo…"; clicked => { root.cv-pick-avatar(); } }
+                            }
+                            Rectangle {}
+                        }
                         LabeledInput { label: "NAME"; placeholder: "e.g. Kestrel"; value <=> cv-name; }
                         LabeledInput { label: "DESCRIPTION"; placeholder: "Short note about this voice"; value <=> cv-desc; }
                         LabeledInput { label: "PERSONALITY"; placeholder: "Optional character / style prompt"; multiline: true; value <=> cv-personality; }
@@ -1396,6 +1459,108 @@ export component AppWindow inherits Window {
                     TBtn {
                         label: "Delete"; generate: true; min-width: 110px;
                         clicked => { root.delete-voice(del-id); del-id = ""; del-name = ""; }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- avatar crop dialog: drag to pan, slider to zoom ---
+    if crop-open : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 320px; height: 404px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 12px;
+                Text { text: "Crop photo"; font-size: 15px; font-weight: 700; color: Theme.fg; }
+                Text { text: "Drag to position · slider to zoom"; font-size: 11px; color: Theme.dim; }
+                // circular viewport — shows exactly what the card circle will show
+                HorizontalLayout {
+                    alignment: center;
+                    vp := Rectangle {
+                        width: 220px; height: 220px; border-radius: 110px;
+                        border-width: 2px; border-color: Theme.acc;
+                        background: #000000;
+                        clip: true;
+                        property <float> srcw: crop-src.width;
+                        property <float> srch: crop-src.height;
+                        property <float> side: min(self.srcw, self.srch) / crop-zoom;
+                        property <float> px-per-src: 220 / self.side;
+                        property <float> sx: clamp(crop-cx * self.srcw - self.side / 2, 0, max(0, self.srcw - self.side));
+                        property <float> sy: clamp(crop-cy * self.srch - self.side / 2, 0, max(0, self.srch - self.side));
+                        Image {
+                            source: crop-src;
+                            x: -vp.sx * vp.px-per-src * 1px;
+                            y: -vp.sy * vp.px-per-src * 1px;
+                            width: vp.srcw * vp.px-per-src * 1px;
+                            height: vp.srch * vp.px-per-src * 1px;
+                        }
+                        dragta := TouchArea {
+                            property <float> start-cx;
+                            property <float> start-cy;
+                            property <length> start-mx;
+                            property <length> start-my;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down) {
+                                    self.start-cx = crop-cx;
+                                    self.start-cy = crop-cy;
+                                    self.start-mx = self.mouse-x;
+                                    self.start-my = self.mouse-y;
+                                }
+                            }
+                            moved => {
+                                crop-cx = clamp(
+                                    self.start-cx - (self.mouse-x - self.start-mx) / 220px * vp.side / vp.srcw,
+                                    vp.side / (2 * vp.srcw), 1 - vp.side / (2 * vp.srcw));
+                                crop-cy = clamp(
+                                    self.start-cy - (self.mouse-y - self.start-my) / 220px * vp.side / vp.srch,
+                                    vp.side / (2 * vp.srch), 1 - vp.side / (2 * vp.srch));
+                            }
+                        }
+                    }
+                }
+                // zoom slider (1x .. 4x)
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text { text: "−"; font-size: 14px; color: Theme.dim; vertical-alignment: center; }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                height: 5px; border-radius: 2.5px; background: Theme.chip-bg;
+                                Rectangle {
+                                    x: 0; y: 0; height: 100%; border-radius: 2.5px;
+                                    width: parent.width * (crop-zoom - 1.0) / 3.0;
+                                    background: Theme.acc;
+                                }
+                            }
+                        }
+                        zta := TouchArea {
+                            clicked => { crop-zoom = 1.0 + max(0.0, min(1.0, zta.mouse-x / self.width)) * 3.0; }
+                            moved => {
+                                if (zta.pressed) {
+                                    crop-zoom = 1.0 + max(0.0, min(1.0, zta.mouse-x / self.width)) * 3.0;
+                                }
+                            }
+                        }
+                    }
+                    Text { text: "+"; font-size: 14px; color: Theme.dim; vertical-alignment: center; }
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    spacing: 10px; alignment: end;
+                    TBtn { label: "Cancel"; clicked => { crop-open = false; root.crop-done(false); } }
+                    TBtn {
+                        label: "✦ Use photo"; generate: true; min-width: 120px;
+                        clicked => { crop-open = false; root.crop-done(true); }
                     }
                 }
             }
