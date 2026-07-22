@@ -41,6 +41,7 @@ class EngineInterface(ServiceInterface):
         self._stt = Transcriber()
         self._history = HistoryStore()
         self._captures = CaptureStore()
+        self._fx_store = effects.EffectPresetStore()
         self._llm = PersonalityLLM()  # lazy — loads on first Compose/Rewrite
         self._models = ModelManager()
         # apply persisted active-model choices to the lazy components
@@ -92,7 +93,7 @@ class EngineInterface(ServiceInterface):
                 if self._active_effect:
                     self.GenerationProgress(gen_id, "effects", 0.9)
                     pcm = await asyncio.to_thread(
-                        effects.apply_preset, pcm, rate, self._active_effect
+                        effects.apply_preset, pcm, rate, self._active_effect, self._fx_store
                     )
                 title = await self._voice_display_name(voice_id)
                 engine, lang = self._voice_meta(voice_id)
@@ -439,25 +440,26 @@ class EngineInterface(ServiceInterface):
 
     @method()
     async def ListEffectPresets(self) -> "s":  # noqa: F821
-        return json.dumps(effects.list_presets())
+        return json.dumps(effects.list_presets(self._fx_store))
 
     @method()
     async def SetEffect(self, preset_id: "s") -> None:  # noqa: F821
-        self._active_effect = preset_id if preset_id in effects.PRESETS else ""
+        known = effects.resolve_preset(preset_id, self._fx_store) is not None
+        self._active_effect = preset_id if known else ""
         log.info("active effect -> %r", self._active_effect or "none")
 
     @method()
     async def ApplyHistoryEffects(self, hid: "s", preset_id: "s") -> "s":  # noqa: F821
         """Re-process a stored clip through a preset; saves a NEW history row."""
         item = self._history.get(hid)
-        if item is None or preset_id not in effects.PRESETS:
+        if item is None or effects.resolve_preset(preset_id, self._fx_store) is None:
             return ""
         path = self._history.audio_abs_path(hid)
         pcm, rate = effects.load_wav(path)
-        pcm = await asyncio.to_thread(effects.apply_preset, pcm, rate, preset_id)
+        pcm = await asyncio.to_thread(effects.apply_preset, pcm, rate, preset_id, self._fx_store)
         new = self._history.save_clip(
             voice_id=item.voice_id,
-            voice_name=f"{item.voice_name} · {effects.preset_name(preset_id)}",
+            voice_name=f"{item.voice_name} · {effects.preset_name(preset_id, self._fx_store)}",
             text=item.text,
             pcm=pcm,
             sample_rate=rate,
@@ -465,6 +467,81 @@ class EngineInterface(ServiceInterface):
             language=item.language,
         )
         return new.id
+
+    # --- effect chain editor -------------------------------------------
+
+    @method()
+    async def ListEffects(self) -> "s":  # noqa: F821
+        """Effect definitions (label, params with default/min/max/step)."""
+        return json.dumps(effects.list_effects())
+
+    @method()
+    async def GetEffectPreset(self, preset_id: "s") -> "s":  # noqa: F821
+        """Full preset incl. chain ("" if unknown)."""
+        p = effects.resolve_preset(preset_id, self._fx_store)
+        return json.dumps(p) if p else ""
+
+    @method()
+    async def CreateEffectPreset(self, name: "s", description: "s", chain_json: "s") -> "s":  # noqa: F821
+        """New user preset; returns id ("" on invalid chain / duplicate name)."""
+        try:
+            chain = json.loads(chain_json)
+        except json.JSONDecodeError:
+            return ""
+        return self._fx_store.create(name, description, chain)
+
+    @method()
+    async def UpdateEffectPreset(self, preset_id: "s", name: "s", description: "s", chain_json: "s") -> "b":  # noqa: F821
+        """Rewrite a user preset in place (builtins are immutable)."""
+        try:
+            chain = json.loads(chain_json)
+        except json.JSONDecodeError:
+            return False
+        return self._fx_store.update(preset_id, name, description, chain)
+
+    @method()
+    async def DeleteEffectPreset(self, preset_id: "s") -> "b":  # noqa: F821
+        return self._fx_store.delete(preset_id)
+
+    @method()
+    async def PreviewEffects(self, hid: "s", chain_json: "s") -> "u":  # noqa: F821
+        """Play a stored clip through an ad-hoc chain (nothing is saved)."""
+        try:
+            chain = json.loads(chain_json)
+        except json.JSONDecodeError:
+            return 0
+        if effects.validate_chain(chain) is not None:
+            return 0
+        item = self._history.get(hid)
+        loaded = self._history.read_pcm(hid)
+        if item is None or loaded is None:
+            return 0
+        pcm, rate = loaded
+        gen_id = self._next_gen_id
+        self._next_gen_id += 1
+
+        async def run() -> None:
+            try:
+                processed = await asyncio.to_thread(effects.apply_chain, pcm, rate, chain)
+                bars = json.dumps(audio.envelope(processed))
+                duration = audio.duration_of(processed, rate)
+                self.SpeakStarted(gen_id)
+                await self._play(
+                    gen_id, processed, rate,
+                    on_start=lambda: self.PlaybackInfo(
+                        gen_id, "", f"{item.voice_name} · preview", duration, bars
+                    ),
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                log.exception("PreviewEffects %s failed", hid)
+            finally:
+                self.SpeakEnded(gen_id)
+                self._tasks.pop(gen_id, None)
+
+        self._tasks[gen_id] = asyncio.create_task(run())
+        return gen_id
 
     @method()
     async def StarHistory(self, hid: "s", starred: "b") -> None:  # noqa: F821

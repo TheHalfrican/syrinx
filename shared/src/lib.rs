@@ -128,6 +128,24 @@ pub trait Engine {
     /// Re-process a history clip through a preset; returns the new history id.
     fn apply_history_effects(&self, hid: &str, preset_id: &str) -> zbus::Result<String>;
 
+    /// Effect definitions for the chain editor (JSON: label, params + ranges).
+    fn list_effects(&self) -> zbus::Result<String>;
+
+    /// Full preset incl. chain as JSON ("" if unknown).
+    fn get_effect_preset(&self, preset_id: &str) -> zbus::Result<String>;
+
+    /// Create a user preset; returns its id ("" on invalid chain / dup name).
+    fn create_effect_preset(&self, name: &str, description: &str, chain_json: &str) -> zbus::Result<String>;
+
+    /// Rewrite a user preset in place (builtins are immutable).
+    fn update_effect_preset(&self, preset_id: &str, name: &str, description: &str, chain_json: &str) -> zbus::Result<bool>;
+
+    /// Delete a user preset.
+    fn delete_effect_preset(&self, preset_id: &str) -> zbus::Result<bool>;
+
+    /// Play a history clip through an ad-hoc chain (nothing saved); gen id.
+    fn preview_effects(&self, hid: &str, chain_json: &str) -> zbus::Result<u32>;
+
     /// Star/unstar a history entry.
     fn star_history(&self, hid: &str, starred: bool) -> zbus::Result<()>;
 
