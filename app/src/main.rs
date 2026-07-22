@@ -663,6 +663,36 @@ async fn refresh_grid(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) {
     .ok();
 }
 
+/// Language of a Kokoro preset from its id convention: `builtin:kokoro:af_…`
+/// — first letter = language (a/b American/British English, e Spanish, …).
+fn kokoro_lang_code(voice_id: &str) -> &'static str {
+    match voice_id.rsplit(':').next().and_then(|v| v.chars().next()) {
+        Some('a') | Some('b') => "en",
+        Some('e') => "es",
+        Some('f') => "fr",
+        Some('h') => "hi",
+        Some('i') => "it",
+        Some('j') => "ja",
+        Some('p') => "pt",
+        Some('z') => "zh",
+        _ => "en",
+    }
+}
+
+/// Kokoro id prefixes for a language code (inverse of kokoro_lang_code).
+fn kokoro_prefixes(code: &str) -> &'static [char] {
+    match code {
+        "es" => &['e'],
+        "fr" => &['f'],
+        "hi" => &['h'],
+        "it" => &['i'],
+        "ja" => &['j'],
+        "pt" => &['p'],
+        "zh" => &['z'],
+        _ => &['a', 'b'], // en
+    }
+}
+
 /// Voicebox's per-engine language subsets (label, code), in Voicebox order.
 fn langs_for_engine(engine: &str) -> Vec<(&'static str, &'static str)> {
     const ALL: &[(&str, &str)] = &[
@@ -745,6 +775,12 @@ async fn worker(
     let profiles_json = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
     let GridData { grid, kokoro_names, kokoro_ids, default_selected } =
         build_grid(raw, &profiles_json);
+    // full preset list kept app-side so the language dropdown can filter it
+    let mut kokoro_all: Vec<(String, String)> = kokoro_ids
+        .iter()
+        .zip(kokoro_names.iter())
+        .map(|(i, n)| (i.to_string(), n.to_string()))
+        .collect();
     let hist_items = build_history(&proxy.list_history().await.unwrap_or_else(|_| "[]".into()));
     {
         ui.upgrade_in_event_loop(move |ui| {
@@ -1127,6 +1163,11 @@ async fn worker(
                                 let raw = proxy.list_voices().await.unwrap_or_default();
                                 let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
                                 let GridData { grid, kokoro_names, kokoro_ids, .. } = build_grid(raw, &pj);
+                                kokoro_all = kokoro_ids
+                                    .iter()
+                                    .zip(kokoro_names.iter())
+                                    .map(|(i, n)| (i.to_string(), n.to_string()))
+                                    .collect();
                                 cv_sample = None;
                                 ui.upgrade_in_event_loop(move |ui| {
                                     ui.set_cv_creating(false);
@@ -1212,7 +1253,7 @@ async fn worker(
                 }
                 Some(Cmd::SelectVoice { id }) => {
                     let (engine, code) = if id.starts_with("builtin:") {
-                        ("kokoro".to_string(), "en".to_string())
+                        ("kokoro".to_string(), kokoro_lang_code(&id).to_string())
                     } else if let Ok(pj) = proxy.get_profile(&id).await {
                         let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
                         let de = p.get("default_engine").and_then(|v| v.as_str()).unwrap_or("");
@@ -1226,8 +1267,47 @@ async fn worker(
                 }
                 Some(Cmd::PickLanguage { voice, index }) => {
                     if let Some(code) = lang_codes.get(index) {
-                        // persisted per cloned profile; presets carry their language
-                        if !voice.is_empty() && !voice.starts_with("builtin:") {
+                        if voice.starts_with("builtin:kokoro:") {
+                            // filter the Kokoro Defaults dropdown to this language
+                            let prefixes = kokoro_prefixes(code);
+                            let mut filtered: Vec<(String, String)> = kokoro_all
+                                .iter()
+                                .filter(|(id, _)| {
+                                    id.rsplit(':')
+                                        .next()
+                                        .and_then(|v| v.chars().next())
+                                        .map(|c| prefixes.contains(&c))
+                                        .unwrap_or(false)
+                                })
+                                .cloned()
+                                .collect();
+                            if filtered.is_empty() {
+                                filtered = kokoro_all.clone();
+                            }
+                            let sel_pos = filtered.iter().position(|(id, _)| *id == voice);
+                            let idx = sel_pos.unwrap_or(0) as i32;
+                            let need_switch = sel_pos.is_none();
+                            let (nid, nname) = filtered[idx as usize].clone();
+                            let names: Vec<SharedString> =
+                                filtered.iter().map(|(_, n)| n.as_str().into()).collect();
+                            let ids: Vec<SharedString> =
+                                filtered.iter().map(|(i, _)| i.as_str().into()).collect();
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(names))));
+                                ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(ids))));
+                                ui.set_kokoro_index(idx);
+                                if need_switch {
+                                    // old selection doesn't speak this language —
+                                    // jump to the first preset that does
+                                    ui.set_selected_voice(nid.as_str().into());
+                                    ui.set_selected_voice_name(nname.as_str().into());
+                                    ui.set_selected_has_personality(false);
+                                    ui.set_kokoro_active(true);
+                                }
+                            })
+                            .ok();
+                        } else if !voice.is_empty() {
+                            // persisted per cloned profile
                             let patch = serde_json::json!({"language": code}).to_string();
                             proxy.update_profile(&voice, &patch).await.ok();
                             refresh_grid(&ui, &proxy).await;
