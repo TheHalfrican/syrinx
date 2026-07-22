@@ -29,15 +29,32 @@ _MODEL = None
 _PROMPTS = {}  # sample_path -> encoded prompt
 
 
+def _device() -> str:
+    """CUDA when the venv's torch can see a GPU (the 4090), else CPU.
+    Overridable via SYRINX_LUXTTS_DEVICE."""
+    env = os.environ.get("SYRINX_LUXTTS_DEVICE", "")
+    if env:
+        return env
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:  # noqa: BLE001
+        pass
+    return "cpu"
+
+
 def _load():
     global _MODEL
     if _MODEL is not None:
         return
     from zipvoice.luxvoice import LuxTTS
 
+    device = _device()
     threads = min(os.cpu_count() or 4, 8)
-    print("luxtts-worker: loading model...", file=sys.stderr, flush=True)
-    _MODEL = LuxTTS(model_path="YatharthS/LuxTTS", device="cpu", threads=threads)
+    print(f"luxtts-worker: loading model on {device}...", file=sys.stderr, flush=True)
+    _MODEL = LuxTTS(model_path="YatharthS/LuxTTS", device=device, threads=threads)
     print("luxtts-worker: model loaded", file=sys.stderr, flush=True)
 
 
