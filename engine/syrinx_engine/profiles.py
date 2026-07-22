@@ -49,6 +49,12 @@ class Profile:
     preset_engine: str = ""  # preset: e.g. "kokoro"
     preset_voice_id: str = ""  # preset: e.g. "af_heart"
     created_at: float = 0.0
+    # avatar: original photo + a square crop rect in source pixels — the app
+    # renders the circle from these, no server-side image processing.
+    avatar_path: str = ""
+    avatar_sx: int = 0
+    avatar_sy: int = 0
+    avatar_side: int = 0
     samples: list = field(default_factory=list)
 
     def summary(self) -> dict:
@@ -62,6 +68,10 @@ class Profile:
             "default_engine": self.default_engine,
             "preset_engine": self.preset_engine,
             "preset_voice_id": self.preset_voice_id,
+            "avatar_path": self.avatar_path,
+            "avatar_sx": self.avatar_sx,
+            "avatar_sy": self.avatar_sy,
+            "avatar_side": self.avatar_side,
         }
 
     def full(self) -> dict:
@@ -116,6 +126,17 @@ class ProfileStore:
                 );
                 """
             )
+            # additive migrations for databases created before avatars
+            for ddl in (
+                "ALTER TABLE profiles ADD COLUMN avatar_path TEXT DEFAULT ''",
+                "ALTER TABLE profiles ADD COLUMN avatar_sx INTEGER DEFAULT 0",
+                "ALTER TABLE profiles ADD COLUMN avatar_sy INTEGER DEFAULT 0",
+                "ALTER TABLE profiles ADD COLUMN avatar_side INTEGER DEFAULT 0",
+            ):
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
     # --- profiles -------------------------------------------------------
 
@@ -166,6 +187,10 @@ class ProfileStore:
             preset_engine=row["preset_engine"],
             preset_voice_id=row["preset_voice_id"],
             created_at=row["created_at"] or 0.0,
+            avatar_path=row["avatar_path"] or "",
+            avatar_sx=row["avatar_sx"] or 0,
+            avatar_sy=row["avatar_sy"] or 0,
+            avatar_side=row["avatar_side"] or 0,
             samples=samples,
         )
 
@@ -203,6 +228,28 @@ class ProfileStore:
             c.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
         shutil.rmtree(self._profiles_dir / profile_id, ignore_errors=True)
 
+    def set_avatar(self, profile_id: str, src: str, sx: int, sy: int, side: int) -> None:
+        """Store an avatar photo + its square crop rect (source pixels).
+        Empty ``src`` keeps the current photo and only updates the crop."""
+        p = self.get(profile_id)
+        if not p:
+            raise ValueError(f"unknown profile: {profile_id}")
+        path = p.avatar_path
+        if src and src != p.avatar_path:
+            dest_dir = self._profiles_dir / profile_id
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            if p.avatar_path:
+                Path(p.avatar_path).unlink(missing_ok=True)
+            ext = Path(src).suffix.lower() or ".png"
+            dest = dest_dir / f"avatar{ext}"
+            shutil.copyfile(src, dest)
+            path = str(dest)
+        with self._conn() as c:
+            c.execute(
+                "UPDATE profiles SET avatar_path=?, avatar_sx=?, avatar_sy=?, avatar_side=? WHERE id=?",
+                (path, sx, sy, side, profile_id),
+            )
+
     # --- export / import ------------------------------------------------
 
     def export_package(self, profile_id: str, dest: str) -> None:
@@ -216,6 +263,8 @@ class ProfileStore:
                 src = Path(s.audio_path)
                 if src.exists():
                     z.write(src, f"samples/{s.id}.wav")
+            if p.avatar_path and Path(p.avatar_path).exists():
+                z.write(p.avatar_path, f"avatar{Path(p.avatar_path).suffix.lower()}")
 
     def import_package(self, src: str) -> str:
         """Create a new profile from an exported .zip; returns the new id."""
@@ -250,6 +299,25 @@ class ProfileStore:
                     self.add_sample(pid, tmp, s.get("reference_text", ""))
                 finally:
                     os.unlink(tmp)
+            if meta.get("avatar_path"):
+                ext = Path(meta["avatar_path"]).suffix.lower() or ".png"
+                try:
+                    data = z.read(f"avatar{ext}")
+                except KeyError:
+                    data = None
+                if data:
+                    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+                        tf.write(data)
+                        tmp = tf.name
+                    try:
+                        self.set_avatar(
+                            pid, tmp,
+                            int(meta.get("avatar_sx", 0)),
+                            int(meta.get("avatar_sy", 0)),
+                            int(meta.get("avatar_side", 0)),
+                        )
+                    finally:
+                        os.unlink(tmp)
         return pid
 
     # --- samples --------------------------------------------------------

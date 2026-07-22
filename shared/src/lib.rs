@@ -57,7 +57,10 @@ pub trait Engine {
     /// Delete a profile and its samples.
     fn delete_profile(&self, profile_id: &str) -> zbus::Result<()>;
 
-    /// Export a profile as a portable .zip (profile.json + samples).
+    /// Attach an avatar photo + square crop rect (source px); empty src re-crops.
+    fn set_profile_avatar(&self, profile_id: &str, src: &str, sx: i32, sy: i32, side: i32) -> zbus::Result<()>;
+
+    /// Export a profile as a portable .zip (profile.json + samples + avatar).
     fn export_profile(&self, profile_id: &str, dest: &str) -> zbus::Result<()>;
 
     /// Import a profile from an exported .zip; returns the new profile id.

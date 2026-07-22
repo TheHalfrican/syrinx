@@ -225,6 +225,11 @@ class EngineInterface(ServiceInterface):
         self._tts.invalidate_profile(profile_id)
 
     @method()
+    async def SetProfileAvatar(self, profile_id: "s", src: "s", sx: "i", sy: "i", side: "i") -> None:  # noqa: F821
+        """Attach an avatar photo + square crop rect; empty src re-crops only."""
+        self._profiles.set_avatar(profile_id, src, sx, sy, side)
+
+    @method()
     async def ExportProfile(self, profile_id: "s", dest: "s") -> None:  # noqa: F821
         self._profiles.export_package(profile_id, dest)
 
