@@ -859,9 +859,11 @@ async fn worker(
                     } else {
                         ui.upgrade_in_event_loop(|ui| ui.set_cv_creating(true)).ok();
                         let sample = cv_sample.clone().unwrap();
+                        // default_engine stays "" so the voice follows the active
+                        // clone engine (Models tab "Use"); it can be pinned later.
                         let spec = serde_json::json!({
                             "name": name, "voice_type": "cloned", "language": language,
-                            "description": desc, "personality": personality, "default_engine": "qwen",
+                            "description": desc, "personality": personality, "default_engine": "",
                         }).to_string();
                         let outcome = async {
                             let pid = proxy.create_profile(&spec).await?;
