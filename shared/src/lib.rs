@@ -57,6 +57,12 @@ pub trait Engine {
     /// Delete a profile and its samples.
     fn delete_profile(&self, profile_id: &str) -> zbus::Result<()>;
 
+    /// Export a profile as a portable .zip (profile.json + samples).
+    fn export_profile(&self, profile_id: &str, dest: &str) -> zbus::Result<()>;
+
+    /// Import a profile from an exported .zip; returns the new profile id.
+    fn import_profile(&self, src: &str) -> zbus::Result<String>;
+
     /// Add a reference sample (an audio file path) to a cloned profile. An empty
     /// `reference_text` auto-transcribes via whisper. Returns JSON
     /// {sample_id, reference_text}.
@@ -92,6 +98,9 @@ pub trait Engine {
 
     /// Seek the current playback to `pct` (0..1).
     fn seek_playback(&self, pct: f64) -> zbus::Result<()>;
+
+    /// Playback volume 0..1, applied live to the current and later clips.
+    fn set_volume(&self, volume: f64) -> zbus::Result<()>;
 
     /// Star/unstar a history entry.
     fn star_history(&self, hid: &str, starred: bool) -> zbus::Result<()>;

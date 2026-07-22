@@ -37,6 +37,17 @@ enum Cmd {
     DownloadModel { id: String },
     DeleteModel { id: String },
     ActivateModel { id: String },
+    // Voicebox-style composer / cards / player
+    GenerateInCharacter { text: String, voice: String },
+    SelectVoice { id: String },
+    PickLanguage { voice: String, index: usize },
+    PickEngine { voice: String, index: usize },
+    ToggleLoop { on: bool },
+    SetVol { v: f64 },
+    ExportVoice { id: String, name: String },
+    EditVoice { id: String },
+    DeleteVoice { id: String },
+    ImportVoice,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -72,7 +83,14 @@ fn main() -> anyhow::Result<()> {
                     starred: false,
                 },
             );
-            let _ = tx.send(Cmd::Generate { text, voice });
+            // "Speak in character" toggle: rewrite via the personality LLM first,
+            // then synthesize the rewritten line (Voicebox's persona flow).
+            if ui.get_persona_on() && ui.get_selected_has_personality() {
+                ui.set_llm_busy(true);
+                let _ = tx.send(Cmd::GenerateInCharacter { text, voice });
+            } else {
+                let _ = tx.send(Cmd::Generate { text, voice });
+            }
         });
     }
     // Stop pressed.
@@ -84,8 +102,10 @@ fn main() -> anyhow::Result<()> {
             let _ = tx.send(Cmd::Cancel { gen_id: 0 });
         });
     }
-    // Track whether the selected voice has a personality (gates Compose/Rewrite).
+    // Track whether the selected voice has a personality (gates Compose/persona)
+    // and feed the composer (placeholder name + per-engine language list).
     {
+        let tx = tx.clone();
         let ui_weak = ui.as_weak();
         ui.on_select_voice(move |id| {
             let ui = ui_weak.unwrap();
@@ -100,6 +120,8 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             ui.set_selected_has_personality(hp);
+            ui.set_selected_voice_name(voice_name(&ui, &id).into());
+            let _ = tx.send(Cmd::SelectVoice { id: id.to_string() });
         });
     }
     {
@@ -247,6 +269,56 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_cv_cancel(move || { let _ = tx.send(Cmd::CvCancel); });
+    }
+
+    // Composer dropdowns, card actions, player loop/volume (Voicebox parity).
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_pick_language(move |i| {
+            let ui = ui_weak.unwrap();
+            let _ = tx.send(Cmd::PickLanguage {
+                voice: ui.get_selected_voice().to_string(),
+                index: i as usize,
+            });
+        });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_pick_engine(move |i| {
+            let ui = ui_weak.unwrap();
+            let _ = tx.send(Cmd::PickEngine {
+                voice: ui.get_selected_voice().to_string(),
+                index: i as usize,
+            });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_toggle_loop(move |on| { let _ = tx.send(Cmd::ToggleLoop { on }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_set_volume(move |v| { let _ = tx.send(Cmd::SetVol { v: v as f64 }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_export_voice(move |id, name| {
+            let _ = tx.send(Cmd::ExportVoice { id: id.to_string(), name: name.to_string() });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_edit_voice(move |id| { let _ = tx.send(Cmd::EditVoice { id: id.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_delete_voice(move |id| { let _ = tx.send(Cmd::DeleteVoice { id: id.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_import_voice(move || { let _ = tx.send(Cmd::ImportVoice); });
     }
 
     let ui_weak = ui.as_weak();
@@ -528,19 +600,96 @@ fn hardware_line(json: &str) -> String {
     format!("{cores} cores · {ram:.1} GB RAM · {gpu_part}")
 }
 
-/// Re-fetch the catalog + hardware and push into the UI.
-async fn refresh_models(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) {
+/// Re-fetch the catalog + hardware and push into the UI. Also rebuilds the
+/// composer's engine dropdown (usable = downloaded + supported voice models);
+/// returns its model ids in dropdown order plus the active voice engine name.
+async fn refresh_models(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) -> (Vec<String>, String) {
     let models_json = proxy.list_models().await.unwrap_or_else(|_| "[]".into());
     let hw_json = proxy.hardware().await.unwrap_or_default();
     let (voice, stt, llm) = build_models(&models_json);
     let hwline = hardware_line(&hw_json);
+
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&models_json).unwrap_or_default();
+    let mut eng_ids: Vec<String> = Vec::new();
+    let mut eng_names: Vec<SharedString> = Vec::new();
+    let mut active_idx: i32 = 0;
+    let mut active_engine = String::from("kokoro");
+    for m in &arr {
+        let s = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let b = |k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+        if s("category") == "voice" && b("downloaded") && b("supported") {
+            if b("active") {
+                active_idx = eng_ids.len() as i32;
+                active_engine = s("engine").to_string();
+            }
+            eng_ids.push(s("id").to_string());
+            eng_names.push(s("display").into());
+        }
+    }
+
     ui.upgrade_in_event_loop(move |ui| {
         ui.set_voice_models(ModelRc::from(Rc::new(VecModel::from(voice))));
         ui.set_stt_models(ModelRc::from(Rc::new(VecModel::from(stt))));
         ui.set_llm_models(ModelRc::from(Rc::new(VecModel::from(llm))));
         ui.set_hardware_line(hwline.into());
+        ui.set_composer_engines(ModelRc::from(Rc::new(VecModel::from(eng_names))));
+        ui.set_composer_engine_index(active_idx);
     })
     .ok();
+    (eng_ids, active_engine)
+}
+
+/// Rebuild the voice-card grid from the engine (after create/edit/delete/import).
+async fn refresh_grid(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) {
+    let raw = proxy.list_voices().await.unwrap_or_default();
+    let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
+    let GridData { grid, .. } = build_grid(raw, &pj);
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_voices(ModelRc::from(Rc::new(VecModel::from(grid))));
+    })
+    .ok();
+}
+
+/// Voicebox's per-engine language subsets (label, code), in Voicebox order.
+fn langs_for_engine(engine: &str) -> Vec<(&'static str, &'static str)> {
+    const ALL: &[(&str, &str)] = &[
+        ("Arabic", "ar"), ("Danish", "da"), ("German", "de"), ("Greek", "el"),
+        ("English", "en"), ("Spanish", "es"), ("Finnish", "fi"), ("French", "fr"),
+        ("Hebrew", "he"), ("Hindi", "hi"), ("Italian", "it"), ("Japanese", "ja"),
+        ("Korean", "ko"), ("Malay", "ms"), ("Dutch", "nl"), ("Norwegian", "no"),
+        ("Polish", "pl"), ("Portuguese", "pt"), ("Russian", "ru"), ("Swedish", "sv"),
+        ("Swahili", "sw"), ("Turkish", "tr"), ("Chinese", "zh"),
+    ];
+    let codes: &[&str] = match engine {
+        "qwen" | "qwen_custom_voice" => &["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+        "luxtts" | "chatterbox_turbo" => &["en"],
+        "chatterbox" => return ALL.to_vec(),
+        "tada" => &["en", "ar", "zh", "de", "es", "fr", "it", "ja", "pl", "pt"],
+        _ => &["en", "es", "fr", "hi", "it", "pt", "ja", "zh"], // kokoro
+    };
+    codes
+        .iter()
+        .filter_map(|c| ALL.iter().find(|(_, code)| code == c).copied())
+        .collect()
+}
+
+/// Push the language dropdown for `engine`, preselecting `current_code`;
+/// returns the codes in dropdown order (for index → code lookups).
+fn update_composer_langs(
+    ui: &slint::Weak<AppWindow>,
+    engine: &str,
+    current_code: &str,
+) -> Vec<&'static str> {
+    let pairs = langs_for_engine(engine);
+    let labels: Vec<SharedString> = pairs.iter().map(|(l, _)| SharedString::from(*l)).collect();
+    let codes: Vec<&'static str> = pairs.iter().map(|(_, c)| *c).collect();
+    let idx = codes.iter().position(|c| *c == current_code).unwrap_or(0) as i32;
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_composer_langs(ModelRc::from(Rc::new(VecModel::from(labels))));
+        ui.set_composer_lang_index(idx);
+    })
+    .ok();
+    codes
 }
 
 /// Update a single model row's download progress in place (no refetch).
@@ -587,12 +736,13 @@ async fn worker(
     {
         ui.upgrade_in_event_loop(move |ui| {
             ui.set_backend(backend.into());
-            if ui.get_selected_voice().is_empty() {
-                ui.set_selected_voice(default_selected.into());
-            }
             ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(kokoro_names))));
             ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
             ui.set_voices(ModelRc::from(Rc::new(VecModel::from(grid))));
+            if ui.get_selected_voice().is_empty() {
+                ui.set_selected_voice(default_selected.clone().into());
+                ui.set_selected_voice_name(voice_name(&ui, &default_selected).into());
+            }
             set_history_model(&ui, hist_items);
         })
         .ok();
@@ -605,11 +755,18 @@ async fn worker(
     let mut llm_res = proxy.receive_llm_result().await?;
     let mut mprog = proxy.receive_model_progress().await?;
     let mut pending_llm: u32 = 0;
-    refresh_models(&ui, &proxy).await;
+    let (mut voice_engine_ids, mut active_engine) = refresh_models(&ui, &proxy).await;
+    let mut lang_codes = update_composer_langs(&ui, "kokoro", "en");
     let mut current_gen: u32 = 0;
     let mut player_dur: f64 = 0.0;
     let mut current_play_gen: u32 = 0;
     let mut playing = false;
+    // Voicebox-parity player/composer state
+    let mut loop_on = false;
+    let mut current_clip = String::new();
+    let mut last_pct: f64 = 0.0;
+    let mut speak_after_llm: Option<String> = None;
+    let mut cv_edit: Option<String> = None;
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -631,11 +788,14 @@ async fn worker(
                     current_play_gen = a.gen_id;
                     playing = true;
                     player_dur = a.duration;
+                    last_pct = 0.0;
+                    current_clip = a.clip_id.to_string();
                     let bars: Vec<f32> = serde_json::from_str(&a.bars).unwrap_or_default();
                     let title = a.title;
                     let clip_id = a.clip_id;
                     let time = format!("0:00 / {}", fmt_dur(a.duration));
                     ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_player_active_visible(true);
                         ui.set_player_bars(ModelRc::from(Rc::new(VecModel::from(bars))));
                         ui.set_player_title(title.into());
                         ui.set_player_id(clip_id.into());
@@ -653,7 +813,11 @@ async fn worker(
                     let id = a.model_id.to_string();
                     match a.status.as_str() {
                         "downloading" => set_model_progress(&ui, id, a.pct as f32, true),
-                        _ => refresh_models(&ui, &proxy).await, // done / error
+                        _ => { // done / error
+                            let r = refresh_models(&ui, &proxy).await;
+                            voice_engine_ids = r.0;
+                            active_engine = r.1;
+                        }
                     }
                 }
             }
@@ -662,18 +826,34 @@ async fn worker(
                     if a.req_id == pending_llm && pending_llm != 0 {
                         pending_llm = 0;
                         let text = a.text;
+                        let ui_text = text.clone();
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_llm_busy(false);
-                            if !text.trim().is_empty() {
-                                ui.set_text(text.into());
+                            if !ui_text.trim().is_empty() {
+                                ui.set_text(ui_text.into());
                             }
                         }).ok();
+                        // persona flow: the rewrite came back — now synthesize it
+                        if let Some(voice) = speak_after_llm.take() {
+                            if text.trim().is_empty() {
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_generating(false);
+                                    ui.set_synthesizing(false);
+                                }).ok();
+                            } else {
+                                match proxy.speak(&text, &voice).await {
+                                    Ok(id) => current_gen = id,
+                                    Err(e) => tracing::error!("persona speak failed: {e}"),
+                                }
+                            }
+                        }
                     }
                 }
             }
             Some(sig) = pprog.next() => {
                 if let Ok(a) = sig.args() {
                     if a.gen_id == current_play_gen {
+                        last_pct = a.pct;
                         let pct = a.pct as f32;
                         let time = format!("{} / {}", fmt_dur(a.pct * player_dur), fmt_dur(player_dur));
                         ui.upgrade_in_event_loop(move |ui| {
@@ -686,13 +866,16 @@ async fn worker(
             Some(sig) = ended.next() => {
                 let is_current = sig.args().map(|a| a.gen_id == current_play_gen).unwrap_or(false);
                 if is_current { playing = false; }
+                // Loop: re-trigger only when the clip ran to its natural end
+                // (a Stop/Cancel arrives with the progress short of 1.0).
+                let looping = is_current && loop_on && last_pct > 0.97 && !current_clip.is_empty();
                 // Refresh history only on success — never wipe the list on a failed call.
                 let refreshed = proxy.list_history().await.ok().map(|j| build_history(&j));
                 ui.upgrade_in_event_loop(move |ui| {
                     ui.set_generating(false);
                     ui.set_synthesizing(false);
                     ui.set_level(0.0);
-                    if is_current {
+                    if is_current && !looping {
                         ui.set_player_playing(false);
                         ui.set_player_paused(false);
                         ui.set_play_pct(1.0);
@@ -701,6 +884,12 @@ async fn worker(
                         set_history_model(&ui, items);
                     }
                 }).ok();
+                if looping {
+                    last_pct = 0.0;
+                    if let Ok(gid) = proxy.play_history(&current_clip).await {
+                        current_gen = gid;
+                    }
+                }
             }
             _ = rec_interval.tick(), if cv_rec.is_some() => {
                 rec_elapsed += 1;
@@ -854,7 +1043,33 @@ async fn worker(
                     }
                 }
                 Some(Cmd::CvCreate { name, desc, personality, language, transcript }) => {
-                    if name.trim().is_empty() || cv_sample.is_none() {
+                    if let Some(pid) = cv_edit.take() {
+                        // edit mode: patch metadata, keep samples untouched
+                        let patch = serde_json::json!({
+                            "name": name, "description": desc,
+                            "personality": personality, "language": language,
+                        }).to_string();
+                        match proxy.update_profile(&pid, &patch).await {
+                            Ok(_) => {
+                                refresh_grid(&ui, &proxy).await;
+                                let pid2 = pid.clone();
+                                let name2 = name.clone();
+                                let hp = !personality.trim().is_empty();
+                                ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_cv_open(false);
+                                    ui.set_cv_edit_id("".into());
+                                    ui.set_cv_name("".into());
+                                    ui.set_cv_desc("".into());
+                                    ui.set_cv_personality("".into());
+                                    if ui.get_selected_voice().as_str() == pid2 {
+                                        ui.set_selected_voice_name(name2.into());
+                                        ui.set_selected_has_personality(hp);
+                                    }
+                                }).ok();
+                            }
+                            Err(e) => tracing::error!("edit voice failed: {e}"),
+                        }
+                    } else if name.trim().is_empty() || cv_sample.is_none() {
                         tracing::warn!("create voice: needs a name and a reference sample");
                     } else {
                         ui.upgrade_in_event_loop(|ui| ui.set_cv_creating(true)).ok();
@@ -904,11 +1119,15 @@ async fn worker(
                 }
                 Some(Cmd::DeleteModel { id }) => {
                     proxy.delete_model(&id).await.ok();
-                    refresh_models(&ui, &proxy).await;
+                    let r = refresh_models(&ui, &proxy).await;
+                    voice_engine_ids = r.0;
+                    active_engine = r.1;
                 }
                 Some(Cmd::ActivateModel { id }) => {
                     proxy.set_active_model(&id).await.ok();
-                    refresh_models(&ui, &proxy).await;
+                    let r = refresh_models(&ui, &proxy).await;
+                    voice_engine_ids = r.0;
+                    active_engine = r.1;
                 }
                 Some(Cmd::Compose { voice_id, prompt }) => {
                     match proxy.compose_profile(&voice_id, &prompt).await {
@@ -927,6 +1146,7 @@ async fn worker(
                         stop_pw_record(&mut child).await;
                     }
                     cv_sample = None;
+                    cv_edit = None;
                     ui.upgrade_in_event_loop(|ui| {
                         ui.set_cv_recording(false);
                         ui.set_cv_sample_label("".into());
@@ -934,7 +1154,147 @@ async fn worker(
                         ui.set_cv_desc("".into());
                         ui.set_cv_personality("".into());
                         ui.set_cv_transcript("".into());
+                        ui.set_cv_edit_id("".into());
                     }).ok();
+                }
+                Some(Cmd::GenerateInCharacter { text, voice }) => {
+                    match proxy.rewrite_profile(&voice, &text).await {
+                        Ok(rid) if rid != 0 => {
+                            pending_llm = rid;
+                            speak_after_llm = Some(voice);
+                        }
+                        _ => {
+                            // no personality / LLM unavailable — speak the raw text
+                            ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok();
+                            match proxy.speak(&text, &voice).await {
+                                Ok(id) => current_gen = id,
+                                Err(e) => tracing::error!("speak failed: {e}"),
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::SelectVoice { id }) => {
+                    let (engine, code) = if id.starts_with("builtin:") {
+                        ("kokoro".to_string(), "en".to_string())
+                    } else if let Ok(pj) = proxy.get_profile(&id).await {
+                        let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
+                        let de = p.get("default_engine").and_then(|v| v.as_str()).unwrap_or("");
+                        let engine = if de.is_empty() { active_engine.clone() } else { de.to_string() };
+                        let code = p.get("language").and_then(|v| v.as_str()).unwrap_or("en").to_string();
+                        (engine, code)
+                    } else {
+                        ("kokoro".to_string(), "en".to_string())
+                    };
+                    lang_codes = update_composer_langs(&ui, &engine, &code);
+                }
+                Some(Cmd::PickLanguage { voice, index }) => {
+                    if let Some(code) = lang_codes.get(index) {
+                        // persisted per cloned profile; presets carry their language
+                        if !voice.is_empty() && !voice.starts_with("builtin:") {
+                            let patch = serde_json::json!({"language": code}).to_string();
+                            proxy.update_profile(&voice, &patch).await.ok();
+                            refresh_grid(&ui, &proxy).await;
+                        }
+                    }
+                }
+                Some(Cmd::PickEngine { voice, index }) => {
+                    if let Some(mid) = voice_engine_ids.get(index).cloned() {
+                        proxy.set_active_model(&mid).await.ok();
+                        let r = refresh_models(&ui, &proxy).await;
+                        voice_engine_ids = r.0;
+                        active_engine = r.1;
+                        // language subset follows the engine for unpinned clones
+                        if !voice.is_empty() && !voice.starts_with("builtin:") {
+                            if let Ok(pj) = proxy.get_profile(&voice).await {
+                                let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
+                                let de = p.get("default_engine").and_then(|v| v.as_str()).unwrap_or("");
+                                let engine = if de.is_empty() { active_engine.clone() } else { de.to_string() };
+                                let code = p.get("language").and_then(|v| v.as_str()).unwrap_or("en").to_string();
+                                lang_codes = update_composer_langs(&ui, &engine, &code);
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::ToggleLoop { on }) => { loop_on = on; }
+                Some(Cmd::SetVol { v }) => { proxy.set_volume(v).await.ok(); }
+                Some(Cmd::ExportVoice { id, name }) => {
+                    let safe: String = name
+                        .to_lowercase()
+                        .chars()
+                        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                        .collect();
+                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                        .set_file_name(format!("{}.syrinx-voice.zip", safe.trim_matches('-')))
+                        .add_filter("Syrinx voice package", &["zip"])
+                        .save_file()
+                        .await
+                    {
+                        let dest = handle.path().to_string_lossy().to_string();
+                        match proxy.export_profile(&id, &dest).await {
+                            Ok(_) => tracing::info!("exported voice -> {dest}"),
+                            Err(e) => tracing::error!("export voice failed: {e}"),
+                        }
+                    }
+                }
+                Some(Cmd::EditVoice { id }) => {
+                    if let Ok(pj) = proxy.get_profile(&id).await {
+                        let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
+                        let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let (name, desc, pers) = (s("name"), s("description"), s("personality"));
+                        let lang = {
+                            let l = s("language");
+                            if l.is_empty() { "en".to_string() } else { l }
+                        };
+                        let lang_idx = ["en", "ja", "zh", "de", "es", "fr", "it", "pt"]
+                            .iter()
+                            .position(|c| *c == lang)
+                            .unwrap_or(0) as i32;
+                        cv_edit = Some(id.clone());
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_cv_name(name.into());
+                            ui.set_cv_desc(desc.into());
+                            ui.set_cv_personality(pers.into());
+                            ui.set_cv_language(lang.into());
+                            ui.set_cv_lang_index(lang_idx);
+                            ui.set_cv_edit_id(id.into());
+                            ui.set_cv_open(true);
+                        }).ok();
+                    }
+                }
+                Some(Cmd::DeleteVoice { id }) => {
+                    match proxy.delete_profile(&id).await {
+                        Ok(_) => {
+                            refresh_grid(&ui, &proxy).await;
+                            ui.upgrade_in_event_loop(move |ui| {
+                                if ui.get_selected_voice().as_str() == id {
+                                    // fall back to the first bundled preset
+                                    if let Some(first) = ui.get_kokoro_ids().row_data(0) {
+                                        ui.set_selected_voice(first.clone());
+                                        ui.set_kokoro_active(true);
+                                        ui.set_selected_has_personality(false);
+                                        ui.set_selected_voice_name(voice_name(&ui, first.as_str()).into());
+                                    }
+                                }
+                            }).ok();
+                        }
+                        Err(e) => tracing::error!("delete voice failed: {e}"),
+                    }
+                }
+                Some(Cmd::ImportVoice) => {
+                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                        .add_filter("Syrinx voice package", &["zip"])
+                        .pick_file()
+                        .await
+                    {
+                        let src = handle.path().to_string_lossy().to_string();
+                        match proxy.import_profile(&src).await {
+                            Ok(pid) => {
+                                tracing::info!("imported voice {pid}");
+                                refresh_grid(&ui, &proxy).await;
+                            }
+                            Err(e) => tracing::error!("import voice failed: {e}"),
+                        }
+                    }
                 }
                 None => break,
             },

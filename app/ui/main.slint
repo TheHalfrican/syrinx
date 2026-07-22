@@ -82,12 +82,42 @@ component Chip inherits Rectangle {
     }
 }
 
+// --- small round icon button (Voicebox-style composer / card actions) ---
+component IconBtn inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> accent;        // filled accent (the Generate button)
+    in property <bool> active;        // toggled-on state (persona, loop)
+    in property <bool> enabled: true;
+    in property <length> size: 30px;
+    in property <length> glyph-size: 13px;
+    callback clicked;
+    property <bool> win95: Theme.name == "win95";
+    width: size; height: size;
+    border-radius: win95 ? 0px : size / 2;
+    border-width: win95 ? 0px : 1px;
+    border-color: (accent || active) ? Theme.acc : Theme.btn-brd;
+    background: accent ? Theme.gen-bg
+             : active ? Theme.acc-soft
+             : ((ib.has-hover && enabled) ? Theme.acc-soft : Theme.btn-bg);
+    opacity: enabled ? 1.0 : 0.45;
+    if win95 : Bevel { width: 100%; height: 100%; sunken: ib.pressed || active; }
+    ib := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+    Text {
+        text: glyph; font-size: glyph-size;
+        color: accent ? Theme.gen-fg : (active ? Theme.acc : Theme.btn-fg);
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
 component VoiceCard inherits Rectangle {
     in property <VoiceItem> v;
     in property <string> selected;
     property <bool> active: v.id == selected;
     property <bool> win95: Theme.name == "win95";
     callback clicked;
+    callback export-clicked;
+    callback edit-clicked;
+    callback delete-clicked;
     border-radius: Theme.rad;
     border-width: win95 ? 0px : 1.5px;
     border-color: active ? Theme.acc : (ta.has-hover ? Theme.acc : Theme.brd);
@@ -112,9 +142,14 @@ component VoiceCard inherits Rectangle {
         Text { text: v.desc; font-size: 11.5px; color: Theme.dim; wrap: word-wrap; }
         Rectangle {}  // flex spacer — push chips to the bottom
         HorizontalLayout {
-            spacing: 6px; alignment: start;
+            spacing: 6px;
             Chip { label: v.lang; }
             Chip { label: v.kind; }
+            Rectangle {}
+            // Voicebox-style card actions: export / edit / delete
+            IconBtn { size: 24px; glyph-size: 11px; glyph: "⇩"; clicked => { root.export-clicked(); } }
+            IconBtn { size: 24px; glyph-size: 11px; glyph: "✎"; clicked => { root.edit-clicked(); } }
+            IconBtn { size: 24px; glyph-size: 11px; glyph: "✕"; clicked => { root.delete-clicked(); } }
         }
     }
 }
@@ -123,8 +158,10 @@ component VoiceCard inherits Rectangle {
 component ThemedDropdown inherits Rectangle {
     in property <[string]> model;
     in-out property <int> current-index: 0;
+    in property <bool> up: false;   // open the list above (for bottom-anchored rows)
     callback selected(int);
     property <bool> win95: Theme.name == "win95";
+    property <length> list-height: min(model.length * 26px + 4px, 210px);
     height: 30px;
     border-radius: Theme.rad;
     border-width: win95 ? 0px : 1px;
@@ -141,9 +178,9 @@ component ThemedDropdown inherits Rectangle {
     }
     ta := TouchArea { clicked => { popup.show(); } }
     popup := PopupWindow {
-        x: 0; y: root.height + 2px;
+        x: 0; y: up ? -list-height - 2px : root.height + 2px;
         width: root.width;
-        height: min(model.length * 26px + 4px, 210px);
+        height: list-height;
         close-policy: close-on-click-outside;
         Rectangle {
             background: win95 ? #ffffff : Theme.card-bg;
@@ -368,6 +405,18 @@ export component AppWindow inherits Window {
     in property <string> backend: "cpu";
     in property <bool> selected-has-personality;
     in property <bool> llm-busy;
+    // --- composer (Voicebox-style) ---
+    in property <string> selected-voice-name;
+    in property <[string]> composer-langs;
+    in-out property <int> composer-lang-index: 0;
+    in property <[string]> composer-engines;
+    in-out property <int> composer-engine-index: 0;
+    in property <[string]> composer-effects: ["No effects", "Robotic · soon", "Radio · soon", "Echo Chamber · soon", "Deep Voice · soon"];
+    in-out property <int> composer-effect-index: 0;
+    in-out property <bool> persona-on: false;   // "speak in character" toggle
+    // --- delete-voice confirm ---
+    in-out property <string> del-id: "";
+    in-out property <string> del-name: "";
     // --- models tab ---
     in property <[ModelItem]> voice-models;
     in property <[ModelItem]> stt-models;
@@ -382,6 +431,9 @@ export component AppWindow inherits Window {
     in property <string> player-time;
     in property <bool> player-playing;
     in-out property <bool> player-paused;
+    in-out property <bool> player-loop: false;
+    in-out property <float> player-volume: 1.0;
+    in-out property <bool> player-active-visible: true;  // X button hides the bar
     in property <bool> synthesizing;
     // --- create-voice modal ---
     in-out property <bool> cv-open: false;
@@ -395,6 +447,8 @@ export component AppWindow inherits Window {
     in-out property <string> cv-personality;
     in-out property <string> cv-transcript;
     in-out property <string> cv-language: "en";
+    in-out property <int> cv-lang-index: 0;
+    in-out property <string> cv-edit-id: "";   // non-empty = the modal edits this profile
 
     callback generate();
     callback stop();
@@ -419,6 +473,14 @@ export component AppWindow inherits Window {
     callback cv-transcribe();
     callback cv-create();
     callback cv-cancel();
+    callback pick-language(int);
+    callback pick-engine(int);
+    callback toggle-loop(bool);
+    callback set-volume(float);
+    callback export-voice(string, string);  // id, name
+    callback edit-voice(string);
+    callback delete-voice(string);
+    callback import-voice();
 
     property <string> tab: "tts";
 
@@ -521,7 +583,7 @@ export component AppWindow inherits Window {
                                 spacing: 10px;
                                 Text { text: "VOICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; vertical-alignment: center; }
                                 Rectangle {}
-                                TBtn { label: "Import voice"; clicked => {} }
+                                TBtn { label: "Import voice"; clicked => { root.import-voice(); } }
                                 TBtn { label: "✦ Create voice"; generate: true; clicked => { cv-open = true; } }
                             }
                             ScrollView {
@@ -554,6 +616,207 @@ export component AppWindow inherits Window {
                                                 root.kokoro-active = false;
                                                 root.select-voice(v.id);
                                             }
+                                            export-clicked => { root.export-voice(v.id, v.name); }
+                                            edit-clicked => { root.edit-voice(v.id); }
+                                            delete-clicked => { root.del-id = v.id; root.del-name = v.name; }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ---- composer (Voicebox-style: corner icon cluster + dropdown row) ----
+                            Rectangle {
+                                height: 136px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
+                                background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                VerticalLayout {
+                                    padding: 10px; spacing: 8px;
+                                    // text area with the icon cluster pinned to the top-right corner
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            if root.text == "" : Text {
+                                                x: 2px; y: 2px; width: parent.width - 4px;
+                                                text: selected-voice-name == "" ? "Select a voice above…"
+                                                    : "Generate speech using " + selected-voice-name + "…";
+                                                font-size: 13.5px; color: Theme.dim; opacity: 0.6;
+                                                wrap: word-wrap; font-family: Theme.font;
+                                            }
+                                            ti := TextInput {
+                                                x: 2px; y: 2px; width: parent.width - 4px; height: parent.height - 4px;
+                                                text <=> root.text;
+                                                font-size: 13.5px; color: Theme.fg; wrap: word-wrap;
+                                                single-line: false;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: start;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                // ⚄ compose · ✧ speak in character · ✦ generate
+                                                if selected-has-personality : IconBtn {
+                                                    glyph: llm-busy ? "…" : "⚄";
+                                                    enabled: !llm-busy;
+                                                    clicked => { root.compose(); }
+                                                }
+                                                if selected-has-personality : IconBtn {
+                                                    glyph: "✧"; active: persona-on;
+                                                    clicked => { persona-on = !persona-on; }
+                                                }
+                                                IconBtn {
+                                                    glyph: generating ? "■" : "✦"; accent: true;
+                                                    clicked => { if (generating) { root.stop(); } else { root.generate(); } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // indeterminate "working" bar — looping marquee via animation-tick()
+                                    if synthesizing || llm-busy : Rectangle {
+                                        height: 4px; border-radius: 2px; background: Theme.chip-bg; clip: true;
+                                        Rectangle {
+                                            height: 100%; width: parent.width * 0.35;
+                                            border-radius: 2px; background: Theme.gen-bg;
+                                            x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
+                                        }
+                                    }
+                                    // language / engine / effects (Voicebox dropdown row; opens upward)
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        ThemedDropdown {
+                                            up: true; horizontal-stretch: 1;
+                                            model: composer-langs;
+                                            current-index <=> composer-lang-index;
+                                            selected(i) => { root.pick-language(i); }
+                                        }
+                                        ThemedDropdown {
+                                            up: true; horizontal-stretch: 1;
+                                            model: composer-engines;
+                                            current-index <=> composer-engine-index;
+                                            selected(i) => { root.pick-engine(i); }
+                                        }
+                                        ThemedDropdown {
+                                            up: true; horizontal-stretch: 1;
+                                            model: composer-effects;
+                                            current-index <=> composer-effect-index;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ---- player: spawns under the text box after a generation ----
+                            if player-active && player-active-visible : Rectangle {
+                                height: 52px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad; background: Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px; spacing: 10px;
+                                    // play / pause / resume
+                                    Rectangle {
+                                        width: 30px; height: 30px; y: parent.height / 2 - 15px;
+                                        border-radius: Theme.name == "win95" ? 0px : 15px;
+                                        border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.acc;
+                                        background: (ppb.pressed && Theme.name != "win95") ? Theme.acc-soft : Theme.gen-bg;
+                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: ppb.pressed; }
+                                        ppb := TouchArea {
+                                            clicked => {
+                                                if (!player-playing) {
+                                                    root.play-hist(player-id);
+                                                } else if (player-paused) {
+                                                    player-paused = false;
+                                                    root.resume();
+                                                } else {
+                                                    player-paused = true;
+                                                    root.pause();
+                                                }
+                                            }
+                                        }
+                                        Text { text: (player-playing && !player-paused) ? "⏸" : "▶"; font-size: 11px; color: Theme.gen-fg;
+                                               horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                    // title + time
+                                    VerticalLayout {
+                                        alignment: center; spacing: 1px; horizontal-stretch: 0;
+                                        Text { text: player-title; font-size: 11.5px; font-weight: 700; color: Theme.fg; overflow: elide; }
+                                        Text { text: player-time; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; }
+                                    }
+                                    // scrubbing waveform (mirrored around center; click to seek)
+                                    Rectangle {
+                                        horizontal-stretch: 1; height: 32px; y: parent.height / 2 - 16px;
+                                        HorizontalLayout {
+                                            spacing: 0px;
+                                            for b[i] in player-bars : Rectangle {
+                                                horizontal-stretch: 1;
+                                                Rectangle {
+                                                    width: parent.width * 0.7;
+                                                    height: max(1px, b * 30px);
+                                                    y: (parent.height - self.height) / 2;
+                                                    border-radius: 0.5px;
+                                                    background: i < play-pct * player-bars.length ? Theme.wave : Theme.wave-dim;
+                                                }
+                                            }
+                                        }
+                                        seekta := TouchArea {
+                                            clicked => {
+                                                play-pct = seekta.mouse-x / self.width;
+                                                root.seek(player-id, seekta.mouse-x / self.width);
+                                            }
+                                        }
+                                    }
+                                    // loop toggle (re-plays the clip when it ends)
+                                    VerticalLayout {
+                                        alignment: center;
+                                        IconBtn {
+                                            size: 26px; glyph-size: 12px; glyph: "⟳"; active: player-loop;
+                                            clicked => { player-loop = !player-loop; root.toggle-loop(player-loop); }
+                                        }
+                                    }
+                                    // volume: mute toggle + slider
+                                    VerticalLayout {
+                                        alignment: center;
+                                        IconBtn {
+                                            size: 26px; glyph-size: 12px;
+                                            glyph: player-volume == 0.0 ? "∅" : "♪";
+                                            clicked => {
+                                                player-volume = player-volume == 0.0 ? 1.0 : 0.0;
+                                                root.set-volume(player-volume);
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 64px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                height: 5px; border-radius: 2.5px; background: Theme.chip-bg;
+                                                Rectangle {
+                                                    x: 0; y: 0; height: 100%; border-radius: 2.5px;
+                                                    width: parent.width * player-volume;
+                                                    background: Theme.acc;
+                                                }
+                                            }
+                                        }
+                                        vta := TouchArea {
+                                            clicked => {
+                                                player-volume = max(0.0, min(1.0, vta.mouse-x / self.width));
+                                                root.set-volume(player-volume);
+                                            }
+                                            moved => {
+                                                if (vta.pressed) {
+                                                    player-volume = max(0.0, min(1.0, vta.mouse-x / self.width));
+                                                    root.set-volume(player-volume);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // close (hides the bar; playback keeps its state)
+                                    VerticalLayout {
+                                        alignment: center;
+                                        IconBtn {
+                                            size: 26px; glyph-size: 11px; glyph: "✕";
+                                            clicked => { player-active-visible = false; }
                                         }
                                     }
                                 }
@@ -709,127 +972,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // ---- player: full-clip waveform that scrubs during playback ----
-                    if tab == "tts" && player-active : Rectangle {
-                        height: 58px;
-                        Rectangle {
-                            x: 22px; width: parent.width - 44px; y: 5px; height: parent.height - 10px;
-                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
-                            border-radius: Theme.rad; background: Theme.card-bg;
-                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
-                            HorizontalLayout {
-                                padding-left: 12px; padding-right: 14px; spacing: 12px;
-                                // play / pause / resume
-                                Rectangle {
-                                    width: 32px; height: 32px; y: parent.height / 2 - 16px;
-                                    border-radius: Theme.name == "win95" ? 0px : 16px;
-                                    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.acc;
-                                    background: (ppb.pressed && Theme.name != "win95") ? Theme.acc-soft : Theme.gen-bg;
-                                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: ppb.pressed; }
-                                    ppb := TouchArea {
-                                        clicked => {
-                                            if (!player-playing) {
-                                                root.play-hist(player-id);
-                                            } else if (player-paused) {
-                                                player-paused = false;
-                                                root.resume();
-                                            } else {
-                                                player-paused = true;
-                                                root.pause();
-                                            }
-                                        }
-                                    }
-                                    Text { text: (player-playing && !player-paused) ? "⏸" : "▶"; font-size: 12px; color: Theme.gen-fg;
-                                           horizontal-alignment: center; vertical-alignment: center; }
-                                }
-                                // title + time
-                                VerticalLayout {
-                                    alignment: center; spacing: 1px; horizontal-stretch: 0;
-                                    Text { text: player-title; font-size: 12.5px; font-weight: 700; color: Theme.fg; overflow: elide; }
-                                    Text { text: player-time; font-size: 10px; font-family: Theme.mono; color: Theme.dim; }
-                                }
-                                // scrubbing waveform (DAW-style: mirrored around center; click to seek)
-                                Rectangle {
-                                    horizontal-stretch: 1; height: 36px;
-                                    HorizontalLayout {
-                                        spacing: 0px;
-                                        for b[i] in player-bars : Rectangle {
-                                            horizontal-stretch: 1;
-                                            Rectangle {
-                                                width: parent.width * 0.7;
-                                                height: max(1px, b * 34px);
-                                                y: (parent.height - self.height) / 2;
-                                                border-radius: 0.5px;
-                                                background: i < play-pct * player-bars.length ? Theme.wave : Theme.wave-dim;
-                                            }
-                                        }
-                                    }
-                                    seekta := TouchArea {
-                                        clicked => {
-                                            play-pct = seekta.mouse-x / self.width;
-                                            root.seek(player-id, seekta.mouse-x / self.width);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ---- composer (TTS only) ----
-                    if tab == "tts" : Rectangle {
-                        height: 118px;
-                        Rectangle {
-                            x: 22px; width: parent.width - 44px; y: 6px; height: parent.height - 24px;
-                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
-                            background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
-                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
-                            VerticalLayout {
-                                padding: 12px; spacing: 8px;
-                                ti := TextInput {
-                                    text <=> root.text;
-                                    font-size: 14px; color: Theme.fg; wrap: word-wrap;
-                                    height: 40px;
-                                    single-line: false;
-                                }
-                                // indeterminate "working" bar — looping marquee via animation-tick()
-                                if synthesizing || llm-busy : Rectangle {
-                                    height: 4px; border-radius: 2px; background: Theme.chip-bg; clip: true;
-                                    Rectangle {
-                                        height: 100%; width: parent.width * 0.35;
-                                        border-radius: 2px; background: Theme.gen-bg;
-                                        x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Text {
-                                        text: "engine: " + backend; font-size: 10.5px; font-family: Theme.mono;
-                                        color: Theme.dim; vertical-alignment: center;
-                                    }
-                                    // personality LLM (only for voices that have one)
-                                    if selected-has-personality : TBtn {
-                                        label: llm-busy ? "…" : "✎ Compose";
-                                        clicked => { if (!llm-busy) { root.compose(); } }
-                                    }
-                                    if selected-has-personality : TBtn {
-                                        label: llm-busy ? "…" : "✦ Rewrite";
-                                        clicked => { if (!llm-busy && text != "") { root.rewrite(); } }
-                                    }
-                                    Rectangle {}
-                                    Text {
-                                        text: llm-busy ? "thinking…" : (generating ? "synthesizing…" : "pick a voice, then Generate");
-                                        font-size: 10.5px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center;
-                                    }
-                                    TBtn {
-                                        label: generating ? "Stop" : "✦ Generate"; generate: true;
-                                        min-width: 130px;
-                                        clicked => { if (generating) { root.stop(); } else { root.generate(); } }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
                     // ---- footer ----
                     Rectangle {
                         height: 26px; border-width: 1px; border-color: Theme.brd;
@@ -871,7 +1013,7 @@ export component AppWindow inherits Window {
                     height: 46px; background: Theme.tb-bg;
                     HorizontalLayout {
                         padding-left: 18px; padding-right: 12px; spacing: 10px;
-                        Text { text: "Create a voice"; font-size: 15px; font-weight: 700; color: Theme.tb-fg; vertical-alignment: center; }
+                        Text { text: cv-edit-id == "" ? "Create a voice" : "Edit voice"; font-size: 15px; font-weight: 700; color: Theme.tb-fg; vertical-alignment: center; }
                         Rectangle {}
                         Rectangle {
                             width: 26px; height: 26px; y: parent.height / 2 - 13px; border-radius: Theme.rad;
@@ -884,8 +1026,8 @@ export component AppWindow inherits Window {
                 // body — two columns
                 HorizontalLayout {
                     padding: 18px; spacing: 20px;
-                    // LEFT: reference audio
-                    VerticalLayout {
+                    // LEFT: reference audio (creation only — edit touches metadata)
+                    if cv-edit-id == "" : VerticalLayout {
                         horizontal-stretch: 1; spacing: 10px;
                         Text { text: "REFERENCE AUDIO"; font-size: 11px; font-weight: 700; color: Theme.dim; }
                         HorizontalLayout {
@@ -973,13 +1115,13 @@ export component AppWindow inherits Window {
                             Text { text: "LANGUAGE"; font-size: 11px; font-weight: 700; color: Theme.dim; }
                             ThemedDropdown {
                                 model: ["English", "Japanese", "Chinese", "German", "Spanish", "French", "Italian", "Portuguese"];
-                                current-index: 0;
+                                current-index <=> cv-lang-index;
                                 selected(i) => { cv-language = ["en", "ja", "zh", "de", "es", "fr", "it", "pt"][i]; }
                             }
                         }
                         Rectangle {}
                         Text {
-                            text: "Cloned voices synthesize with the Qwen engine.";
+                            text: "Cloned voices synthesize with the active voice engine (see Models).";
                             font-size: 10.5px; font-family: Theme.mono; color: Theme.dim; wrap: word-wrap;
                         }
                     }
@@ -992,9 +1134,43 @@ export component AppWindow inherits Window {
                         padding-left: 18px; padding-right: 18px; spacing: 10px; alignment: end;
                         TBtn { label: "Cancel"; clicked => { root.cv-cancel(); cv-open = false; } }
                         TBtn {
-                            label: cv-creating ? "Creating…" : "✦ Create voice"; generate: true; min-width: 150px;
+                            label: cv-edit-id != "" ? (cv-creating ? "Saving…" : "✦ Save changes")
+                                 : (cv-creating ? "Creating…" : "✦ Create voice");
+                            generate: true; min-width: 150px;
                             clicked => { root.cv-create(); }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- delete-voice confirm dialog ---
+    if del-id != "" : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 380px; height: 158px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px; clip: true;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                Text { text: "Delete voice"; font-size: 15px; font-weight: 700; color: Theme.fg; }
+                Text {
+                    text: "Delete \"" + del-name + "\"? Its reference samples are removed too. Generated clips stay in history.";
+                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    spacing: 10px; alignment: end;
+                    TBtn { label: "Cancel"; clicked => { del-id = ""; del-name = ""; } }
+                    TBtn {
+                        label: "Delete"; generate: true; min-width: 110px;
+                        clicked => { root.delete-voice(del-id); del-id = ""; del-name = ""; }
                     }
                 }
             }
