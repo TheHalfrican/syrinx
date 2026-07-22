@@ -5250,6 +5250,7 @@ name = "syrinx-dictate"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "gtk4",
  "gtk4-layer-shell",
  "syrinx-shared",
