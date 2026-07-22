@@ -85,6 +85,7 @@ component Chip inherits Rectangle {
 // --- small round icon button (Voicebox-style composer / card actions) ---
 component IconBtn inherits Rectangle {
     in property <string> glyph;
+    in property <string> tip;         // hover tooltip ('95 pale-yellow on win95)
     in property <bool> accent;        // filled accent (the Generate button)
     in property <bool> active;        // toggled-on state (persona, loop)
     in property <bool> enabled: true;
@@ -106,6 +107,22 @@ component IconBtn inherits Rectangle {
         text: glyph; font-size: glyph-size;
         color: accent ? Theme.gen-fg : (active ? Theme.acc : Theme.btn-fg);
         horizontal-alignment: center; vertical-alignment: center;
+    }
+    // tooltip — right-aligned above the button so card clipping can't cut it
+    if tip != "" && ib.has-hover : Rectangle {
+        x: root.width - self.width;
+        y: -self.height - 5px;
+        height: 20px;
+        width: tl.preferred-width + 14px;
+        background: win95 ? #ffffe1 : #10151be6;
+        border-width: 1px; border-color: win95 ? #000000 : #ffffff33;
+        border-radius: win95 ? 0px : 4px;
+        tl := Text {
+            x: 7px; height: 100%;
+            text: tip; font-size: 10px; font-family: Theme.font;
+            color: win95 ? #000000 : #ffffff;
+            vertical-alignment: center;
+        }
     }
 }
 
@@ -147,9 +164,9 @@ component VoiceCard inherits Rectangle {
             Chip { label: v.kind; }
             Rectangle {}
             // Voicebox-style card actions: export / edit / delete
-            IconBtn { size: 24px; glyph-size: 11px; glyph: "⇩"; clicked => { root.export-clicked(); } }
-            IconBtn { size: 24px; glyph-size: 11px; glyph: "✎"; clicked => { root.edit-clicked(); } }
-            IconBtn { size: 24px; glyph-size: 11px; glyph: "✕"; clicked => { root.delete-clicked(); } }
+            IconBtn { size: 24px; glyph-size: 11px; glyph: "⇩"; tip: "Export voice"; clicked => { root.export-clicked(); } }
+            IconBtn { size: 24px; glyph-size: 11px; glyph: "✎"; tip: "Edit voice"; clicked => { root.edit-clicked(); } }
+            IconBtn { size: 24px; glyph-size: 11px; glyph: "✕"; tip: "Delete voice"; clicked => { root.delete-clicked(); } }
         }
     }
 }
@@ -658,15 +675,18 @@ export component AppWindow inherits Window {
                                                 // ⚄ compose · ✧ speak in character · ✦ generate
                                                 if selected-has-personality : IconBtn {
                                                     glyph: llm-busy ? "…" : "⚄";
+                                                    tip: llm-busy ? "Thinking…" : "Compose a line in character";
                                                     enabled: !llm-busy;
                                                     clicked => { root.compose(); }
                                                 }
                                                 if selected-has-personality : IconBtn {
                                                     glyph: "✧"; active: persona-on;
+                                                    tip: persona-on ? "Speaking in character" : "Speak in character";
                                                     clicked => { persona-on = !persona-on; }
                                                 }
                                                 IconBtn {
                                                     glyph: generating ? "■" : "✦"; accent: true;
+                                                    tip: generating ? "Stop" : "Generate speech";
                                                     clicked => { if (generating) { root.stop(); } else { root.generate(); } }
                                                 }
                                             }
@@ -770,6 +790,7 @@ export component AppWindow inherits Window {
                                         alignment: center;
                                         IconBtn {
                                             size: 26px; glyph-size: 12px; glyph: "⟳"; active: player-loop;
+                                            tip: player-loop ? "Looping" : "Loop";
                                             clicked => { player-loop = !player-loop; root.toggle-loop(player-loop); }
                                         }
                                     }
@@ -779,6 +800,7 @@ export component AppWindow inherits Window {
                                         IconBtn {
                                             size: 26px; glyph-size: 12px;
                                             glyph: player-volume == 0.0 ? "∅" : "♪";
+                                            tip: player-volume == 0.0 ? "Unmute" : "Mute";
                                             clicked => {
                                                 player-volume = player-volume == 0.0 ? 1.0 : 0.0;
                                                 root.set-volume(player-volume);
@@ -815,7 +837,7 @@ export component AppWindow inherits Window {
                                     VerticalLayout {
                                         alignment: center;
                                         IconBtn {
-                                            size: 26px; glyph-size: 11px; glyph: "✕";
+                                            size: 26px; glyph-size: 11px; glyph: "✕"; tip: "Hide player";
                                             clicked => { player-active-visible = false; }
                                         }
                                     }
@@ -889,12 +911,26 @@ export component AppWindow inherits Window {
                                                         del => { root.delete-hist(h.id); }
                                                     }
                                                 }
-                                                // message text, clamped to ~2 lines
+                                                // message text — read-only, scrollable, selectable (Ctrl+C copies)
                                                 Rectangle {
-                                                    height: 32px; clip: true;
-                                                    Text {
-                                                        width: 100%; text: h.text; font-size: 11.5px; color: Theme.dim;
-                                                        wrap: word-wrap; vertical-alignment: top;
+                                                    height: 48px;
+                                                    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                                    border-radius: Theme.rad;
+                                                    background: Theme.name == "win95" ? #ffffff : Theme.pan-bg;
+                                                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                                    hsv := ScrollView {
+                                                        x: 7px; y: 4px;
+                                                        width: parent.width - 14px; height: parent.height - 8px;
+                                                        viewport-width: self.visible-width;
+                                                        hti := TextInput {
+                                                            x: 0; y: 0;
+                                                            width: hsv.visible-width;
+                                                            height: max(hsv.visible-height, self.preferred-height);
+                                                            text: h.text;
+                                                            read-only: true;
+                                                            wrap: word-wrap; single-line: false;
+                                                            font-size: 11.5px; color: Theme.dim; font-family: Theme.font;
+                                                        }
                                                     }
                                                 }
                                             }
