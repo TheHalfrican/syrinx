@@ -246,6 +246,12 @@ class EngineInterface(ServiceInterface):
     async def DeleteSample(self, sample_id: "s") -> None:  # noqa: F821
         self._profiles.delete_sample(sample_id)
 
+    @method()
+    async def UpdateSampleText(self, profile_id: "s", sample_id: "s", text: "s") -> None:  # noqa: F821
+        """Correct a sample's reference transcript (clone prompts rebuild)."""
+        self._profiles.set_sample_text(sample_id, text)
+        self._tts.invalidate_profile(profile_id)
+
     # --- personality LLM (compose / rewrite) ---------------------------
 
     def _personality_of(self, voice_id: str) -> str:

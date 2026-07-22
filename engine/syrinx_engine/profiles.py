@@ -57,6 +57,7 @@ class Profile:
             "name": self.name,
             "voice_type": self.voice_type,
             "language": self.language,
+            "description": self.description,
             "has_personality": bool(self.personality),
             "default_engine": self.default_engine,
             "preset_engine": self.preset_engine,

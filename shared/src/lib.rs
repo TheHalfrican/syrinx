@@ -83,6 +83,9 @@ pub trait Engine {
     /// Delete a reference sample.
     fn delete_sample(&self, sample_id: &str) -> zbus::Result<()>;
 
+    /// Correct a sample's reference transcript (clone prompts rebuild).
+    fn update_sample_text(&self, profile_id: &str, sample_id: &str, text: &str) -> zbus::Result<()>;
+
     // --- generation history (persisted clips) ---------------------------
 
     /// List saved generations as a JSON array (newest first).
