@@ -57,6 +57,19 @@ enum Cmd {
     TrRefine { text: String },
     TrSaveCapture { id: String, text: String },
     TrDeleteCapture { id: String },
+    // effects chain editor
+    FxeShow,
+    FxeLoad { index: usize },
+    FxeNew,
+    FxeAdd { index: usize },
+    FxeRemove { index: usize },
+    FxeToggle { index: usize },
+    FxeMove { index: usize, dir: i32 },
+    FxeExpand { index: usize },
+    FxeParam { index: usize, norm: f32 },
+    FxeSave { name: String, desc: String },
+    FxeDelete,
+    FxePreview { hid: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -382,6 +395,83 @@ fn main() -> anyhow::Result<()> {
         let tx = tx.clone();
         ui.on_tr_delete_capture(move |id| {
             let _ = tx.send(Cmd::TrDeleteCapture { id: id.to_string() });
+        });
+    }
+    // Effects chain editor.
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        let history = history.clone();
+        ui.on_fxe_show(move || {
+            let ui = ui_weak.unwrap();
+            let can = !ui.get_player_id().is_empty()
+                || history.iter().any(|h| !h.id.is_empty());
+            ui.set_fxe_can_preview(can);
+            let _ = tx.send(Cmd::FxeShow);
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_load(move |i| { let _ = tx.send(Cmd::FxeLoad { index: i as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_new(move || { let _ = tx.send(Cmd::FxeNew); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_add_effect(move |i| { let _ = tx.send(Cmd::FxeAdd { index: i as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_remove(move |i| { let _ = tx.send(Cmd::FxeRemove { index: i as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_toggle(move |i| { let _ = tx.send(Cmd::FxeToggle { index: i as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_move(move |i, d| { let _ = tx.send(Cmd::FxeMove { index: i as usize, dir: d }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_expand(move |i| { let _ = tx.send(Cmd::FxeExpand { index: i as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_param(move |i, v| { let _ = tx.send(Cmd::FxeParam { index: i as usize, norm: v }); });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_fxe_save(move || {
+            let ui = ui_weak.unwrap();
+            let _ = tx.send(Cmd::FxeSave {
+                name: ui.get_fxe_name().to_string(),
+                desc: ui.get_fxe_desc().to_string(),
+            });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_fxe_delete(move || { let _ = tx.send(Cmd::FxeDelete); });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        let history = history.clone();
+        ui.on_fxe_preview(move || {
+            let ui = ui_weak.unwrap();
+            // prefer the clip in the player; fall back to the newest history row
+            let hid = if !ui.get_player_id().is_empty() {
+                ui.get_player_id().to_string()
+            } else {
+                history.iter().find(|h| !h.id.is_empty()).map(|h| h.id.to_string()).unwrap_or_default()
+            };
+            if !hid.is_empty() {
+                let _ = tx.send(Cmd::FxePreview { hid });
+            }
         });
     }
     // Crop accepted: turn the dialog's zoom/pan into a square source-pixel rect.
@@ -1017,6 +1107,112 @@ fn set_captures_model(ui: &AppWindow, items: Vec<CaptureItem>) {
     }
 }
 
+/// Refresh the composer effects dropdown ("No effects" + presets) and the
+/// editor's preset list. Returns (dropdown ids, editor (id, builtin) pairs).
+async fn refresh_effect_presets(
+    ui: &slint::Weak<AppWindow>,
+    proxy: &EngineProxy<'_>,
+) -> (Vec<String>, Vec<(String, bool)>) {
+    let fx_json = proxy.list_effect_presets().await.unwrap_or_else(|_| "[]".into());
+    let fx: Vec<serde_json::Value> = serde_json::from_str(&fx_json).unwrap_or_default();
+    let mut labels: Vec<SharedString> = vec!["No effects".into()];
+    let mut ids = vec![String::new()];
+    let mut pairs = Vec::new();
+    let mut items = Vec::new();
+    for p in &fx {
+        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let builtin = p.get("builtin").and_then(|v| v.as_bool()).unwrap_or(true);
+        labels.push(name.into());
+        ids.push(id.to_string());
+        pairs.push((id.to_string(), builtin));
+        items.push(FxPresetItem { id: id.into(), name: name.into(), builtin });
+    }
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_composer_effects(ModelRc::from(Rc::new(VecModel::from(labels))));
+        ui.set_fxe_presets(ModelRc::from(Rc::new(VecModel::from(items))));
+    })
+    .ok();
+    (ids, pairs)
+}
+
+/// Format an effect param value with decimals matched to its step size.
+fn fx_fmt(v: f64, step: f64) -> String {
+    if step >= 1.0 {
+        format!("{v:.0}")
+    } else if step >= 0.1 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+/// Push the editor's chain (and the expanded row's params) into the UI models.
+fn fxe_sync(
+    ui: &slint::Weak<AppWindow>,
+    defs: &[serde_json::Value],
+    chain: &[serde_json::Value],
+    expanded: i32,
+) {
+    let def_of = |t: &str| defs.iter().find(|d| d.get("id").and_then(|v| v.as_str()) == Some(t));
+    let rows: Vec<FxRowItem> = chain
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let t = e.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let label = def_of(t)
+                .and_then(|d| d.get("label"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(t);
+            FxRowItem {
+                label: label.into(),
+                enabled: e.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                expanded: i as i32 == expanded,
+            }
+        })
+        .collect();
+    let params: Vec<FxParamItem> = chain
+        .get(usize::try_from(expanded).unwrap_or(usize::MAX))
+        .map(|e| {
+            let t = e.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            def_of(t)
+                .and_then(|d| d.get("params"))
+                .and_then(|p| p.as_array())
+                .map(|list| {
+                    list.iter()
+                        .map(|pd| {
+                            let name = pd.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let min = pd.get("min").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let max = pd.get("max").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                            let step = pd.get("step").and_then(|v| v.as_f64()).unwrap_or(0.01);
+                            let dflt = pd.get("default").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let val = e
+                                .get("params")
+                                .and_then(|p| p.get(name))
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(dflt);
+                            FxParamItem {
+                                label: pd
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(name)
+                                    .into(),
+                                value_text: fx_fmt(val, step).into(),
+                                norm: ((val - min) / (max - min)).clamp(0.0, 1.0) as f32,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_fxe_chain(ModelRc::from(Rc::new(VecModel::from(rows))));
+        ui.set_fxe_params(ModelRc::from(Rc::new(VecModel::from(params))));
+    })
+    .ok();
+}
+
 async fn worker(
     ui: slint::Weak<AppWindow>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
@@ -1067,21 +1263,13 @@ async fn worker(
     let mut pending_llm: u32 = 0;
     let (mut voice_models, mut active_engine) = refresh_models(&ui, &proxy).await;
     let mut lang_codes = update_composer_langs(&ui, "kokoro", "en");
-    // effects dropdown: "No effects" + the engine's built-in presets
-    let effect_ids: Vec<String> = {
-        let fx_json = proxy.list_effect_presets().await.unwrap_or_else(|_| "[]".into());
-        let fx: Vec<serde_json::Value> = serde_json::from_str(&fx_json).unwrap_or_default();
-        let mut labels: Vec<SharedString> = vec!["No effects".into()];
-        let mut ids = vec![String::new()];
-        for p in &fx {
-            labels.push(p.get("name").and_then(|v| v.as_str()).unwrap_or("").into());
-            ids.push(p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string());
-        }
-        ui.upgrade_in_event_loop(move |ui| {
-            ui.set_composer_effects(ModelRc::from(Rc::new(VecModel::from(labels))));
-        }).ok();
-        ids
-    };
+    // effects dropdown: "No effects" + engine presets (builtin + user)
+    let (mut effect_ids, mut fxe_presets) = refresh_effect_presets(&ui, &proxy).await;
+    // effects chain editor state — the worker owns the chain JSON
+    let mut fxe_defs: Vec<serde_json::Value> = Vec::new();
+    let mut fxe_chain: Vec<serde_json::Value> = Vec::new();
+    let mut fxe_pid = String::new(); // loaded user preset id ("" = new / builtin copy)
+    let mut fxe_expanded: i32 = -1;
     let mut current_gen: u32 = 0;
     let mut player_dur: f64 = 0.0;
     let mut current_play_gen: u32 = 0;
@@ -1992,6 +2180,226 @@ async fn worker(
                         }
                         Err(e) => tracing::error!("delete capture failed: {e}"),
                     }
+                }
+                Some(Cmd::FxeShow) => {
+                    if fxe_defs.is_empty() {
+                        let defs_json = proxy.list_effects().await.unwrap_or_else(|_| "[]".into());
+                        fxe_defs = serde_json::from_str(&defs_json).unwrap_or_default();
+                        let mut add: Vec<SharedString> = vec!["＋ Add effect…".into()];
+                        for d in &fxe_defs {
+                            add.push(d.get("label").and_then(|v| v.as_str()).unwrap_or("").into());
+                        }
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_fxe_add_model(ModelRc::from(Rc::new(VecModel::from(add))));
+                        }).ok();
+                    }
+                    let r = refresh_effect_presets(&ui, &proxy).await;
+                    effect_ids = r.0;
+                    fxe_presets = r.1;
+                    fxe_chain.clear();
+                    fxe_pid.clear();
+                    fxe_expanded = -1;
+                    fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                    ui.upgrade_in_event_loop(|ui| {
+                        ui.set_fxe_preset_index(-1);
+                        ui.set_fxe_builtin(false);
+                        ui.set_fxe_can_delete(false);
+                        ui.set_fxe_name("".into());
+                        ui.set_fxe_desc("".into());
+                        ui.set_fxe_status("".into());
+                        ui.set_fxe_open(true);
+                    }).ok();
+                }
+                Some(Cmd::FxeLoad { index }) => {
+                    if let Some((pid, builtin)) = fxe_presets.get(index).cloned() {
+                        if let Ok(pjson) = proxy.get_effect_preset(&pid).await {
+                            if let Ok(p) = serde_json::from_str::<serde_json::Value>(&pjson) {
+                                fxe_chain = p.get("chain").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+                                fxe_expanded = -1;
+                                fxe_pid = if builtin { String::new() } else { pid };
+                                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                // editing a builtin saves as the user's own copy
+                                let display = if builtin { format!("{name} (custom)") } else { name.to_string() };
+                                let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                                let idx = index as i32;
+                                ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_fxe_preset_index(idx);
+                                    ui.set_fxe_builtin(builtin);
+                                    ui.set_fxe_can_delete(!builtin);
+                                    ui.set_fxe_name(display.into());
+                                    ui.set_fxe_desc(desc.into());
+                                    ui.set_fxe_status("".into());
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::FxeNew) => {
+                    fxe_chain.clear();
+                    fxe_pid.clear();
+                    fxe_expanded = -1;
+                    fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                    ui.upgrade_in_event_loop(|ui| {
+                        ui.set_fxe_preset_index(-1);
+                        ui.set_fxe_builtin(false);
+                        ui.set_fxe_can_delete(false);
+                        ui.set_fxe_name("".into());
+                        ui.set_fxe_desc("".into());
+                        ui.set_fxe_status("".into());
+                    }).ok();
+                }
+                Some(Cmd::FxeAdd { index }) => {
+                    if let Some(d) = fxe_defs.get(index) {
+                        let t = d.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let mut params = serde_json::Map::new();
+                        if let Some(list) = d.get("params").and_then(|p| p.as_array()) {
+                            for pd in list {
+                                if let (Some(n), Some(v)) =
+                                    (pd.get("name").and_then(|v| v.as_str()), pd.get("default"))
+                                {
+                                    params.insert(n.to_string(), v.clone());
+                                }
+                            }
+                        }
+                        fxe_chain.push(serde_json::json!({"type": t, "enabled": true, "params": params}));
+                        fxe_expanded = fxe_chain.len() as i32 - 1;
+                        fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                    }
+                }
+                Some(Cmd::FxeRemove { index }) => {
+                    if index < fxe_chain.len() {
+                        fxe_chain.remove(index);
+                        fxe_expanded = -1;
+                        fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                    }
+                }
+                Some(Cmd::FxeToggle { index }) => {
+                    if let Some(e) = fxe_chain.get_mut(index) {
+                        let cur = e.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                        e["enabled"] = serde_json::Value::Bool(!cur);
+                        fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                    }
+                }
+                Some(Cmd::FxeMove { index, dir }) => {
+                    let j = index as i32 + dir;
+                    if index < fxe_chain.len() && j >= 0 && (j as usize) < fxe_chain.len() {
+                        fxe_chain.swap(index, j as usize);
+                        if fxe_expanded == index as i32 {
+                            fxe_expanded = j;
+                        } else if fxe_expanded == j {
+                            fxe_expanded = index as i32;
+                        }
+                        fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                    }
+                }
+                Some(Cmd::FxeExpand { index }) => {
+                    fxe_expanded = if fxe_expanded == index as i32 { -1 } else { index as i32 };
+                    fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                }
+                Some(Cmd::FxeParam { index, norm }) => {
+                    if let Some(e) = fxe_chain.get_mut(usize::try_from(fxe_expanded).unwrap_or(usize::MAX)) {
+                        let t = e.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let pd = fxe_defs
+                            .iter()
+                            .find(|d| d.get("id").and_then(|v| v.as_str()) == Some(t.as_str()))
+                            .and_then(|d| d.get("params"))
+                            .and_then(|p| p.as_array())
+                            .and_then(|l| l.get(index))
+                            .cloned();
+                        if let Some(pd) = pd {
+                            let name = pd.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let min = pd.get("min").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let max = pd.get("max").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                            let step = pd.get("step").and_then(|v| v.as_f64()).unwrap_or(0.01);
+                            let raw = min + norm as f64 * (max - min);
+                            let snapped = ((raw / step).round() * step).clamp(min, max);
+                            if !e.get("params").map(|p| p.is_object()).unwrap_or(false) {
+                                e["params"] = serde_json::json!({});
+                            }
+                            e["params"][name.as_str()] = serde_json::json!(snapped);
+                            // update the one param row in place — replacing the model
+                            // mid-drag would tear down the slider under the pointer
+                            let vt: SharedString = fx_fmt(snapped, step).into();
+                            let nnorm = ((snapped - min) / (max - min)).clamp(0.0, 1.0) as f32;
+                            ui.upgrade_in_event_loop(move |ui| {
+                                let m = ui.get_fxe_params();
+                                if let Some(vm) = m.as_any().downcast_ref::<VecModel<FxParamItem>>() {
+                                    if let Some(mut row) = vm.row_data(index) {
+                                        row.value_text = vt;
+                                        row.norm = nnorm;
+                                        vm.set_row_data(index, row);
+                                    }
+                                }
+                            }).ok();
+                        }
+                    }
+                }
+                Some(Cmd::FxeSave { name, desc }) => {
+                    if name.trim().is_empty() {
+                        ui.upgrade_in_event_loop(|ui| ui.set_fxe_status("a name is required".into())).ok();
+                    } else {
+                        let chain_json = serde_json::to_string(&fxe_chain).unwrap_or_else(|_| "[]".into());
+                        let saved = if fxe_pid.is_empty() {
+                            proxy.create_effect_preset(name.trim(), &desc, &chain_json).await
+                                .ok().filter(|s| !s.is_empty())
+                        } else {
+                            match proxy.update_effect_preset(&fxe_pid, name.trim(), &desc, &chain_json).await {
+                                Ok(true) => Some(fxe_pid.clone()),
+                                _ => None,
+                            }
+                        };
+                        match saved {
+                            Some(pid) => {
+                                fxe_pid = pid.clone();
+                                let r = refresh_effect_presets(&ui, &proxy).await;
+                                effect_ids = r.0;
+                                fxe_presets = r.1;
+                                let idx = fxe_presets.iter().position(|(id, _)| *id == pid)
+                                    .map(|i| i as i32).unwrap_or(-1);
+                                let display = name.trim().to_string();
+                                ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_fxe_preset_index(idx);
+                                    ui.set_fxe_builtin(false);
+                                    ui.set_fxe_can_delete(true);
+                                    ui.set_fxe_name(display.into());
+                                    ui.set_fxe_status("saved ✓".into());
+                                }).ok();
+                            }
+                            None => {
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_fxe_status("couldn't save — duplicate name?".into());
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::FxeDelete) => {
+                    if !fxe_pid.is_empty() {
+                        let _ = proxy.delete_effect_preset(&fxe_pid).await;
+                        fxe_pid.clear();
+                        fxe_chain.clear();
+                        fxe_expanded = -1;
+                        let r = refresh_effect_presets(&ui, &proxy).await;
+                        effect_ids = r.0;
+                        fxe_presets = r.1;
+                        fxe_sync(&ui, &fxe_defs, &fxe_chain, fxe_expanded);
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_fxe_preset_index(-1);
+                            ui.set_fxe_can_delete(false);
+                            ui.set_fxe_name("".into());
+                            ui.set_fxe_desc("".into());
+                            ui.set_fxe_status("preset deleted".into());
+                        }).ok();
+                    }
+                }
+                Some(Cmd::FxePreview { hid }) => {
+                    let chain_json = serde_json::to_string(&fxe_chain).unwrap_or_else(|_| "[]".into());
+                    let status = match proxy.preview_effects(&hid, &chain_json).await {
+                        Ok(id) if id != 0 => "previewing…",
+                        _ => "preview failed",
+                    };
+                    ui.upgrade_in_event_loop(move |ui| ui.set_fxe_status(status.into())).ok();
                 }
                 Some(Cmd::CvPickAvatar) => {
                     if let Some(handle) = rfd::AsyncFileDialog::new()

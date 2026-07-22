@@ -10,6 +10,9 @@ export struct VoiceItem {
 }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
 export struct CaptureItem { id: string, text: string, date: string }
+export struct FxPresetItem { id: string, name: string, builtin: bool }
+export struct FxRowItem { label: string, enabled: bool, expanded: bool }
+export struct FxParamItem { label: string, value-text: string, norm: float }
 export struct ModelItem {
     id: string, display: string, size-label: string, description: string,
     downloaded: bool, downloading: bool, active: bool, supported: bool,
@@ -521,6 +524,31 @@ export component AppWindow inherits Window {
     in-out property <string> fx-id: "";
     in-out property <string> fx-voice: "";
     in-out property <int> fx-index: 0;
+    // --- effects chain editor modal ---
+    in-out property <bool> fxe-open: false;
+    in property <[FxPresetItem]> fxe-presets;
+    in property <int> fxe-preset-index: -1;    // highlighted preset (-1 = new chain)
+    in property <[FxRowItem]> fxe-chain;
+    in property <[FxParamItem]> fxe-params;    // params of the expanded row only
+    in-out property <string> fxe-name;
+    in-out property <string> fxe-desc;
+    in property <bool> fxe-builtin: false;     // loaded from a builtin (save = copy)
+    in property <[string]> fxe-add-model: ["＋ Add effect…"];
+    in property <string> fxe-status;
+    in property <bool> fxe-can-preview: false;
+    in property <bool> fxe-can-delete: false;
+    callback fxe-show();
+    callback fxe-load(int);
+    callback fxe-new();
+    callback fxe-add-effect(int);   // index into the effect defs
+    callback fxe-remove(int);
+    callback fxe-toggle(int);
+    callback fxe-move(int, int);    // row, direction (-1 up / +1 down)
+    callback fxe-expand(int);
+    callback fxe-param(int, float); // param row, normalized 0..1
+    callback fxe-save();
+    callback fxe-delete();
+    callback fxe-preview();
     // --- models tab ---
     in property <[ModelItem]> voice-models;
     in property <[ModelItem]> stt-models;
@@ -905,6 +933,10 @@ export component AppWindow inherits Window {
                                             model: composer-effects;
                                             current-index <=> composer-effect-index;
                                             selected(i) => { root.pick-effect(i); }
+                                        }
+                                        IconBtn {
+                                            glyph: "✎"; tip: "Edit effect presets";
+                                            clicked => { root.fxe-show(); }
                                         }
                                     }
                                 }
@@ -1767,7 +1799,9 @@ export component AppWindow inherits Window {
                 }
                 Rectangle {}
                 HorizontalLayout {
-                    spacing: 10px; alignment: end;
+                    spacing: 10px;
+                    TBtn { label: "✎ Presets…"; clicked => { fx-id = ""; root.fxe-show(); } }
+                    Rectangle {}
                     TBtn { label: "Cancel"; clicked => { fx-id = ""; } }
                     TBtn {
                         label: "✦ Apply"; generate: true; min-width: 110px;
@@ -1809,6 +1843,161 @@ export component AppWindow inherits Window {
                     TBtn {
                         label: "Delete"; generate: true; min-width: 110px;
                         clicked => { root.delete-voice(del-id); del-id = ""; del-name = ""; }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- effects chain editor modal ---
+    if fxe-open : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 680px; height: 520px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px; clip: true;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            HorizontalLayout {
+                padding: 18px; spacing: 14px;
+                // LEFT: preset list
+                VerticalLayout {
+                    width: 180px; spacing: 8px;
+                    Text { text: "EFFECT PRESETS"; font-size: 11px; font-weight: 700; color: Theme.dim; }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 4px;
+                            for p[i] in fxe-presets : Rectangle {
+                                height: 30px; border-radius: Theme.rad;
+                                background: i == fxe-preset-index ? Theme.acc-soft
+                                    : (pta.has-hover ? Theme.chip-bg : transparent);
+                                pta := TouchArea { clicked => { root.fxe-load(i); } }
+                                HorizontalLayout {
+                                    padding-left: 8px; padding-right: 8px; spacing: 6px;
+                                    Text {
+                                        text: p.name; font-size: 12px; color: Theme.fg;
+                                        overflow: elide; vertical-alignment: center; horizontal-stretch: 1;
+                                    }
+                                    if p.builtin : Text {
+                                        text: "◇"; font-size: 10px; color: Theme.dim; vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TBtn { label: "＋ New preset"; clicked => { root.fxe-new(); } }
+                }
+                Rectangle { width: 1px; background: Theme.brd; }
+                // RIGHT: chain editor
+                VerticalLayout {
+                    horizontal-stretch: 1; spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        LabeledInput { label: "NAME"; placeholder: "e.g. Cave Troll"; value <=> fxe-name; horizontal-stretch: 1; }
+                        LabeledInput { label: "DESCRIPTION"; placeholder: "optional"; value <=> fxe-desc; horizontal-stretch: 2; }
+                    }
+                    if fxe-builtin : Text {
+                        text: "Built-in preset — saving creates your own editable copy.";
+                        font-size: 10px; font-family: Theme.mono; color: Theme.dim;
+                    }
+                    // the chain: reorderable rows, click a row to edit its params
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 6px;
+                            for r[i] in fxe-chain : Rectangle {
+                                // fixed height per state so the ScrollView scrolls
+                                height: 32px + (r.expanded ? fxe-params.length * 38px + 10px : 0px);
+                                border-width: Theme.name == "win95" ? 0px : 1px;
+                                border-color: Theme.brd; border-radius: Theme.rad;
+                                background: r.enabled ? Theme.card-bg : Theme.pan-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                rta := TouchArea { clicked => { root.fxe-expand(i); } }
+                                VerticalLayout {
+                                    HorizontalLayout {
+                                        height: 32px; padding-left: 8px; padding-right: 4px; spacing: 2px;
+                                        Text {
+                                            text: r.expanded ? "▾" : "▸"; font-size: 10px; color: Theme.dim;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: " " + r.label; font-size: 12px; font-weight: 700;
+                                            color: r.enabled ? Theme.fg : Theme.dim;
+                                            vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+                                        }
+                                        IconBtn { size: 22px; glyph-size: 10px; glyph: "▲"; tip: "Move up"; clicked => { root.fxe-move(i, -1); } }
+                                        IconBtn { size: 22px; glyph-size: 10px; glyph: "▼"; tip: "Move down"; clicked => { root.fxe-move(i, 1); } }
+                                        IconBtn {
+                                            size: 22px; glyph-size: 11px; glyph: "⏻"; active: r.enabled;
+                                            tip: r.enabled ? "Bypass" : "Enable";
+                                            clicked => { root.fxe-toggle(i); }
+                                        }
+                                        IconBtn { size: 22px; glyph-size: 10px; glyph: "✕"; tip: "Remove"; clicked => { root.fxe-remove(i); } }
+                                    }
+                                    if r.expanded : VerticalLayout {
+                                        padding-left: 22px; padding-right: 10px; padding-bottom: 10px; spacing: 4px;
+                                        for pm[j] in fxe-params : VerticalLayout {
+                                            height: 38px; spacing: 3px;
+                                            HorizontalLayout {
+                                                Text { text: pm.label; font-size: 10.5px; color: Theme.dim; horizontal-stretch: 1; }
+                                                Text { text: pm.value-text; font-size: 10.5px; font-family: Theme.mono; color: Theme.fg; }
+                                            }
+                                            Rectangle {
+                                                height: 14px;
+                                                Rectangle {
+                                                    y: 4.5px; height: 5px; border-radius: 2.5px; background: Theme.chip-bg;
+                                                    Rectangle {
+                                                        x: 0; y: 0; height: 100%; border-radius: 2.5px;
+                                                        width: parent.width * pm.norm;
+                                                        background: Theme.acc;
+                                                    }
+                                                }
+                                                psta := TouchArea {
+                                                    clicked => { root.fxe-param(j, max(0.0, min(1.0, psta.mouse-x / self.width))); }
+                                                    moved => {
+                                                        if (self.pressed) {
+                                                            root.fxe-param(j, max(0.0, min(1.0, psta.mouse-x / self.width)));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if fxe-chain.length == 0 : Text {
+                                text: "— empty chain: add an effect below —";
+                                font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    adddd := ThemedDropdown {
+                        up: true;
+                        model: fxe-add-model;
+                        selected(i) => {
+                            if (i > 0) { root.fxe-add-effect(i - 1); }
+                            adddd.current-index = 0;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: fxe-status; font-size: 10.5px; font-family: Theme.mono;
+                            color: Theme.dim; vertical-alignment: center; horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        TBtn {
+                            label: "▶ Preview";
+                            clicked => { if (fxe-can-preview && fxe-chain.length > 0) { root.fxe-preview(); } }
+                        }
+                        if fxe-can-delete : TBtn { label: "✕ Delete"; clicked => { root.fxe-delete(); } }
+                        TBtn { label: "▤ Save"; generate: true; clicked => { root.fxe-save(); } }
+                        TBtn { label: "Close"; clicked => { fxe-open = false; } }
                     }
                 }
             }
