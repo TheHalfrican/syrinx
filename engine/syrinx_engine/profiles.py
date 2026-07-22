@@ -49,12 +49,17 @@ class Profile:
     preset_engine: str = ""  # preset: e.g. "kokoro"
     preset_voice_id: str = ""  # preset: e.g. "af_heart"
     created_at: float = 0.0
-    # avatar: original photo + a square crop rect in source pixels — the app
-    # renders the circle from these, no server-side image processing.
+    # avatar: original photo + a crop rect in source pixels — the app renders
+    # the shape from these, no server-side image processing. mode "circle"
+    # crops a square (avatar_side == width == height); mode "panel" crops a
+    # tall rect (width avatar_side, height avatar_sh) shown as the card's
+    # right third.
     avatar_path: str = ""
+    avatar_mode: str = "circle"
     avatar_sx: int = 0
     avatar_sy: int = 0
     avatar_side: int = 0
+    avatar_sh: int = 0
     samples: list = field(default_factory=list)
 
     def summary(self) -> dict:
@@ -69,9 +74,11 @@ class Profile:
             "preset_engine": self.preset_engine,
             "preset_voice_id": self.preset_voice_id,
             "avatar_path": self.avatar_path,
+            "avatar_mode": self.avatar_mode,
             "avatar_sx": self.avatar_sx,
             "avatar_sy": self.avatar_sy,
             "avatar_side": self.avatar_side,
+            "avatar_sh": self.avatar_sh,
         }
 
     def full(self) -> dict:
@@ -132,6 +139,8 @@ class ProfileStore:
                 "ALTER TABLE profiles ADD COLUMN avatar_sx INTEGER DEFAULT 0",
                 "ALTER TABLE profiles ADD COLUMN avatar_sy INTEGER DEFAULT 0",
                 "ALTER TABLE profiles ADD COLUMN avatar_side INTEGER DEFAULT 0",
+                "ALTER TABLE profiles ADD COLUMN avatar_mode TEXT DEFAULT 'circle'",
+                "ALTER TABLE profiles ADD COLUMN avatar_sh INTEGER DEFAULT 0",
             ):
                 try:
                     c.execute(ddl)
@@ -188,9 +197,11 @@ class ProfileStore:
             preset_voice_id=row["preset_voice_id"],
             created_at=row["created_at"] or 0.0,
             avatar_path=row["avatar_path"] or "",
+            avatar_mode=row["avatar_mode"] or "circle",
             avatar_sx=row["avatar_sx"] or 0,
             avatar_sy=row["avatar_sy"] or 0,
             avatar_side=row["avatar_side"] or 0,
+            avatar_sh=row["avatar_sh"] or 0,
             samples=samples,
         )
 
@@ -228,8 +239,10 @@ class ProfileStore:
             c.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
         shutil.rmtree(self._profiles_dir / profile_id, ignore_errors=True)
 
-    def set_avatar(self, profile_id: str, src: str, sx: int, sy: int, side: int) -> None:
-        """Store an avatar photo + its square crop rect (source pixels).
+    def set_avatar(
+        self, profile_id: str, src: str, mode: str, sx: int, sy: int, sw: int, sh: int
+    ) -> None:
+        """Store an avatar photo + crop rect (source px). mode: circle|panel.
         Empty ``src`` keeps the current photo and only updates the crop."""
         p = self.get(profile_id)
         if not p:
@@ -244,10 +257,13 @@ class ProfileStore:
             dest = dest_dir / f"avatar{ext}"
             shutil.copyfile(src, dest)
             path = str(dest)
+        if mode not in ("circle", "panel"):
+            mode = "circle"
         with self._conn() as c:
             c.execute(
-                "UPDATE profiles SET avatar_path=?, avatar_sx=?, avatar_sy=?, avatar_side=? WHERE id=?",
-                (path, sx, sy, side, profile_id),
+                "UPDATE profiles SET avatar_path=?, avatar_mode=?, avatar_sx=?, avatar_sy=?, "
+                "avatar_side=?, avatar_sh=? WHERE id=?",
+                (path, mode, sx, sy, sw, sh, profile_id),
             )
 
     # --- export / import ------------------------------------------------
@@ -310,11 +326,14 @@ class ProfileStore:
                         tf.write(data)
                         tmp = tf.name
                     try:
+                        side = int(meta.get("avatar_side", 0))
                         self.set_avatar(
                             pid, tmp,
+                            meta.get("avatar_mode", "circle"),
                             int(meta.get("avatar_sx", 0)),
                             int(meta.get("avatar_sy", 0)),
-                            int(meta.get("avatar_side", 0)),
+                            side,
+                            int(meta.get("avatar_sh", 0)) or side,
                         )
                     finally:
                         os.unlink(tmp)
