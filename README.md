@@ -17,10 +17,10 @@ Four small pieces on the D-Bus session bus, each doing one thing well:
 
 | Component | Language | Role |
 |-----------|----------|------|
-| `engine/` | Python | ML inference (Qwen3-TTS + whisper.cpp), plays audio via PipeWire, exposes `sh.syrinx.Engine1` on D-Bus. Runs as a hot `systemd --user` service. |
+| `engine/` | Python | ML inference (Kokoro TTS, LuxTTS voice cloning, faster-whisper STT, Qwen3 personality LLM), pedalboard effects, plays audio via PipeWire, exposes `sh.syrinx.Engine1` on D-Bus. |
 | `app/`    | Rust + **Slint** | The main window — native GPU-rendered UI. |
 | `dictate/`| Rust | The dictation pill: a `wlr-layer-shell` overlay, PipeWire capture, `ydotool` paste. Fired by a Hyprland keybind. |
-| `mcp/`    | — | MCP server exposing `syrinx.speak` to agents. |
+| `mcp/`    | — | MCP server exposing `syrinx.speak` to agents (stub). |
 | `shared/` | Rust | Shared D-Bus client + types for the Rust crates. |
 
 Why this shape: every failure mode of a portable stack (WebKitGTK rendering,
@@ -54,4 +54,26 @@ bind = SUPER, D, exec, syrinx-dictate toggle
 
 ## Status
 
-Skeleton / design phase. Stubs mark where the real work goes (`TODO(syrinx)`).
+Daily-drivable on a CPU-only machine; GPU cloning engines (Qwen-TTS,
+Chatterbox, TADA) are the next milestone.
+
+Working today:
+
+- **Text-to-speech** with Kokoro preset voices (language-filtered) and
+  **voice cloning** with LuxTTS — CPU, faster than realtime, chunked at
+  sentence boundaries so long texts synthesize in bounded memory.
+- **Voice profiles**: create from a recording / upload / system-audio capture,
+  full editing, avatars (circle or side-panel crop), portable export/import
+  zips, per-profile engine pins, and a personality LLM (compose /
+  speak-in-character / rewrite).
+- **Persistent history** with a player (loop, live volume, drag-to-seek
+  waveform), star / regenerate / export, and retroactive effects.
+- **Effects**: pedalboard chains — four built-in presets plus a full chain
+  editor (reorder, bypass, per-parameter sliders, live preview, saved user
+  presets).
+- **Transcription workspace**: mic / system-audio / file import with live
+  streaming partials, LLM transcript refinement, and persistent text captures.
+- **Dictation pill** (`syrinx-dictate toggle`) with an optional `--refine`
+  cleanup pass.
+- **Models tab**: download and hot-switch STT / LLM / voice engines.
+- Multiple full-chrome UI themes (Matrix TTY, Win95, Frutiger Aero among them).

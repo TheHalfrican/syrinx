@@ -8,18 +8,41 @@ reference targets:
 | Laptop  | Intel iGPU (UHD/Xe) | CPU (torch cpu build) |
 | Desktop | 14900K iGPU **or** RTX 4090 | **RTX 4090, CUDA** (Ada / sm_89) |
 
+Everything below the model layer already works on the CPU box: Kokoro presets,
+LuxTTS cloning (faster than realtime), faster-whisper STT, the Qwen3
+personality LLM, and pedalboard effects. The GPU's job is the heavier cloning
+engines (Qwen-TTS, Chatterbox, TADA) and faster everything else.
+
 ## Engine backend selection
 
-`tts.py::_detect_backend()` picks `cuda` / `rocm` / `cpu` at startup. Overrides:
+`backends/__init__.py::detect_device()` picks `cuda` / `rocm` / `cpu` from what
+torch can see; the active backend is surfaced via the `Backend` D-Bus property.
+Isolated-venv workers (LuxTTS) detect their own device the same way.
 
-- `SYRINX_BACKEND=cuda|rocm|cpu` — force a backend.
-- `SYRINX_MODEL=large|small` — model tier (auto-selected by VRAM otherwise).
+Environment overrides (all optional):
 
-Surface the active backend via the `Backend` D-Bus property (already exposed).
+| Variable | Effect |
+|----------|--------|
+| `SYRINX_DATA_DIR` | Data root (profiles, history db, models). Default `~/.local/share/syrinx`. |
+| `SYRINX_TTS_ENGINE` | Clone-engine override (`luxtts` / `qwen`) — normally set live via the Models tab. |
+| `SYRINX_MODEL` | Qwen-TTS model tier. |
+| `SYRINX_WHISPER_MODEL` | faster-whisper size (default `base.en`). |
+| `SYRINX_LLM_MODEL` | Personality/refinement LLM (default Qwen3 `1.7B`). |
+| `SYRINX_LUXTTS_DEVICE` | Force the LuxTTS worker onto `cpu` / `cuda`. |
+| `SYRINX_TTS_CHUNK_CHARS` | Long-text chunk size for cloning engines (default 800). |
+| `SYRINX_DICTATE_REFINE` | `1` = dictation pill always runs the LLM cleanup pass. |
+
+## Long text is chunked, not scaled by hardware
+
+Cloning engines synthesize long text in sentence-boundary chunks (crossfaded
+at the joins) because flow-matching memory grows steeply with target duration —
+an unchunked 2-minute text once ballooned the LuxTTS worker to ~14 GB on a
+15 GB box. Chunking caps peak memory regardless of RAM/VRAM, so the default
+stays the same on every machine.
 
 ## CUDA (RTX 4090) fast path
 
-Apply in `SpeechSynthesizer.load()` once real Qwen3-TTS lands:
+Apply in the GPU backends as they land (see `backends/qwen.py`):
 
 ```python
 import torch
@@ -32,13 +55,16 @@ device = "cuda"
 ```
 
 - bf16 autocast: ~2× faster, half the VRAM (24 GB to spare).
-- The hot `systemd --user` engine keeps weights resident on the GPU across
-  requests — load cost is paid once at login, every generation is instant.
+- The hot engine keeps weights resident across requests — load cost is paid
+  once, every generation after that is instant.
+- LuxTTS on GPU: CUDA torch + a matching k2 wheel in `.venv-luxtts`; the worker
+  then picks CUDA automatically.
 
 ## STT
 
-Build **whisper.cpp with CUDA** (`GGML_CUDA=1`, or an AUR `whisper.cpp-cuda`).
-Desktop: `large-v3` in <1 s. Laptop: `base`/`small` on CPU stays snappy.
+**faster-whisper** (CTranslate2) runs in the engine venv on both boxes.
+Desktop: switch to `large-v3` via the Models tab for accuracy in <1 s.
+Laptop: `base.en` on CPU stays snappy.
 
 ## Arch / CachyOS packages
 

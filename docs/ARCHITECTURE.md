@@ -22,11 +22,12 @@ so it deletes those layers and uses the native primitive in each case:
         ▼
   ┌──────────────────┐      D-Bus       ┌────────────────────────────┐
   │ syrinx-dictate   │◄────────────────►│ syrinx-engine (Python)     │
-  │ (Rust)           │                  │  Qwen3-TTS (torch)         │
-  │ • layer-shell UI │                  │  whisper.cpp (STT)         │
-  │ • PipeWire capture│                 │  PipeWire playback         │
-  │ • ydotool paste  │                  │  systemd --user, hot       │
-  └──────────────────┘                  └───────────┬────────────────┘
+  │ (Rust)           │                  │  Kokoro TTS · LuxTTS clone │
+  │ • layer-shell UI │                  │  faster-whisper (STT)      │
+  │ • PipeWire capture│                 │  Qwen3 personality LLM     │
+  │ • ydotool paste  │                  │  pedalboard effects        │
+  └──────────────────┘                  │  PipeWire playback         │
+                                        └───────────┬────────────────┘
                                                      │ D-Bus
                         ┌────────────────┐  D-Bus    │
                         │ syrinx-mcp     │◄──────────┤
@@ -42,24 +43,35 @@ which is great for testing.
 
 ## D-Bus interface: `sh.syrinx.Engine1`
 
-Bus name `sh.syrinx.Engine`, object `/sh/syrinx/Engine`.
+Bus name `sh.syrinx.Engine`, object `/sh/syrinx/Engine`. The authoritative
+contract is the Rust proxy trait in **`shared/src/lib.rs`** — both `syrinx-app`
+and `syrinx-dictate` build against it. Summary by area:
 
-**Methods**
-- `Speak(s text, s voice_id, a{sv} opts) → u gen_id`
-- `Transcribe(ay pcm) → s text`
-- `ListVoices() → a(ss)` *(id, display_name)*
-- `CloneVoice(s name, s sample_path) → s profile_id`
-- `ListModels() → a{sv}` · `DownloadModel(s id) → b`
-- `Cancel(u gen_id)`
+- **TTS / STT**: `Speak`, `Transcribe` (sync, short clips),
+  `TranscribeFile → req_id` (async; partials via `TranscribeProgress`, final via
+  `TranscribeResult`), `ListVoices`, `Cancel`.
+- **Profiles**: create / list / get / update / delete, `AddSample`,
+  `UpdateSampleText`, `SetProfileAvatar`, `ExportProfile` / `ImportProfile`
+  (portable zips), `CloneVoice`.
+- **History**: list / play (+ `PlayHistoryAt`), pause / resume / seek,
+  `SetVolume`, star / delete / regenerate, `ExportPackage`, `HistoryAudioPath`.
+- **LLM**: `ComposeProfile`, `RewriteProfile`, `RefineTranscript` — all return a
+  request id; results arrive via the `LlmResult` signal (D-Bus replies time out
+  at ~25 s, so anything slow goes id + signal).
+- **Effects**: `ListEffectPresets`, `SetEffect`, `ApplyHistoryEffects`, plus the
+  chain editor: `ListEffects` (definitions + param ranges), preset CRUD
+  (`Get/Create/Update/DeleteEffectPreset`), `PreviewEffects`.
+- **Captures**: `SaveCapture`, `ListCaptures`, `UpdateCapture`, `DeleteCapture`
+  (text-only transcription history).
+- **Models**: `ListModels`, `Hardware`, `DownloadModel`, `DeleteModel`,
+  `SetActiveModel` (hot-switches STT / LLM / voice engine).
 
-**Signals**
-- `GenerationProgress(u gen_id, s state, d pct)`
-- `AudioLevel(u gen_id, d rms)`  ← feeds the UI waveform + the pill animation
-- `SpeakStarted(u gen_id)` · `SpeakEnded(u gen_id)`
-- `ModelDownloadProgress(s id, d pct)`
+**Signals**: `GenerationProgress` (incl. `error: …`), `AudioLevel`,
+`PlaybackInfo` / `PlaybackProgress`, `LlmResult`,
+`TranscribeProgress` / `TranscribeResult`, `ModelProgress`,
+`SpeakStarted` / `SpeakEnded`.
 
-**Properties**
-- `ModelLoaded b` · `Backend s` (`cuda`|`rocm`|`cpu`) · `GpuAvailable b`
+**Properties**: `ModelLoaded b` · `Backend s` (`cuda`|`rocm`|`cpu`).
 
 Audio bytes never travel over D-Bus in bulk: the engine plays TTS output itself
 via PipeWire and emits only lightweight `AudioLevel` samples for visualization.
@@ -67,8 +79,11 @@ via PipeWire and emits only lightweight `AudioLevel` samples for visualization.
 ## Dictation flow
 
 1. Hyprland: `bind = SUPER, D, exec, syrinx-dictate toggle`
-2. `syrinx-dictate` maps a **layer-shell** pill and starts **PipeWire** capture.
-3. On stop (keybind again, or VAD), it sends PCM to `Transcribe` (whisper.cpp — no torch).
+2. `syrinx-dictate` maps a **layer-shell** pill and starts audio capture.
+3. On stop (keybind again), it sends the recording to `Transcribe`
+   (faster-whisper). With `--refine` (or `SYRINX_DICTATE_REFINE=1`) the raw
+   transcript takes an extra LLM cleanup pass — fillers out, punctuation in —
+   falling back to the raw text on any failure.
 4. Result → `wl-copy <text>` then `ydotool key ctrl+v` into the focused window.
 5. Pill fades out.
 
@@ -79,9 +94,14 @@ via PipeWire and emits only lightweight `AudioLevel` samples for visualization.
 - **`systemd --user`** unit for the engine (socket-activatable), so it's loaded
   once at login and both the app and the pill attach instantly.
 
-## Open design questions (for later)
+## Design questions — resolved
 
-- STT: whisper.cpp binding vs subprocess vs a small Rust wrapper.
-- Engine in-process vs always separate (separate wins for UI responsiveness).
-- Model storage location + download UX (reuse `~/.cache/huggingface`?).
-- Multi-GPU / backend switching at runtime (`Backend` property + restart).
+- STT: **faster-whisper** (CTranslate2) in the engine venv; no whisper.cpp.
+- Engine always separate (a hot D-Bus service) — UI responsiveness won.
+- Model storage: `~/.local/share/syrinx/` (`SYRINX_DATA_DIR` overrides);
+  active-model choices persist in `models.json`; downloads via the Models tab.
+- Backend switching: live, no restart — the Models tab hot-swaps STT / LLM /
+  voice engines (`SetActiveModel`); heavyweight cloning engines run as
+  isolated-venv worker subprocesses (LuxTTS is the template).
+- Ops slower than the ~25 s D-Bus reply timeout return a request id and
+  deliver results via signals (`LlmResult`, `TranscribeResult`, …).
