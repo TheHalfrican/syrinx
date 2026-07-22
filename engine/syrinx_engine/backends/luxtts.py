@@ -12,7 +12,10 @@ import json
 import logging
 from pathlib import Path
 
+import numpy as np
+
 from . import detect_device
+from .. import chunking
 
 log = logging.getLogger("syrinx.engine.tts.luxtts")
 
@@ -57,36 +60,64 @@ class LuxTTSBackend:
     async def synthesize(self, text: str, voice_id: str) -> tuple:
         raise ValueError("LuxTTS has no preset voices")
 
+    async def _request(self, sample, text: str) -> tuple:
+        """One worker round-trip (caller holds the lock)."""
+        await self._ensure_worker()
+        self._req_id += 1
+        rid = self._req_id
+        payload = json.dumps({"id": rid, "sample": str(sample), "text": text}) + "\n"
+        self._proc.stdin.write(payload.encode())
+        await self._proc.stdin.drain()
+        while True:
+            line = await self._proc.stdout.readline()
+            if not line:
+                self._proc = None
+                raise RuntimeError("LuxTTS worker exited (see ~/.cache/syrinx-luxtts.log)")
+            try:
+                resp = json.loads(line.decode())
+            except json.JSONDecodeError:
+                # stray library print that escaped the worker's redirect
+                log.debug("luxtts worker noise: %s", line.decode(errors="replace").rstrip())
+                continue
+            if resp.get("id") != rid:
+                # reply to a request whose awaiter was cancelled — drop it
+                log.debug("luxtts stale reply %s (want %s)", resp.get("id"), rid)
+                continue
+            break
+        if not resp.get("ok"):
+            raise RuntimeError(f"LuxTTS synth failed: {resp.get('error')}")
+        raw_path = Path(resp["raw"])
+        rate = int(resp["rate"])
+        pcm = raw_path.read_bytes()
+        raw_path.unlink(missing_ok=True)
+        return pcm, rate
+
     async def synthesize_profile(self, profile, text: str, instruct: str = "") -> tuple:
         if not profile.samples:
             raise ValueError(f"profile {profile.id} has no reference samples")
         sample = profile.samples[0].audio_path
+        # Long text synthesizes per sentence-boundary chunk: flow-matching
+        # memory grows steeply with target duration (a 2-minute text OOM-killed
+        # the worker on the 15 GB box). The worker caches the encoded prompt by
+        # sample path, so per-chunk overhead is just the synthesis itself.
+        chunks = chunking.split_text_into_chunks(text, chunking.max_chunk_chars())
         async with self._lock:
-            await self._ensure_worker()
-            self._req_id += 1
-            rid = self._req_id
-            payload = json.dumps({"id": rid, "sample": str(sample), "text": text}) + "\n"
-            self._proc.stdin.write(payload.encode())
-            await self._proc.stdin.drain()
-            while True:
-                line = await self._proc.stdout.readline()
-                if not line:
-                    self._proc = None
-                    raise RuntimeError("LuxTTS worker exited (see ~/.cache/syrinx-luxtts.log)")
-                try:
-                    resp = json.loads(line.decode())
-                    break
-                except json.JSONDecodeError:
-                    # stray library print that escaped the worker's redirect
-                    log.debug("luxtts worker noise: %s", line.decode(errors="replace").rstrip())
-            if not resp.get("ok"):
-                raise RuntimeError(f"LuxTTS synth failed: {resp.get('error')}")
-            raw_path = Path(resp["raw"])
-            rate = int(resp["rate"])
-        pcm = raw_path.read_bytes()
-        raw_path.unlink(missing_ok=True)
-        log.info("synthesize_profile [luxtts] (%s): %r", profile.id, text[:60])
-        return pcm, rate
+            if len(chunks) <= 1:
+                pcm, rate = await self._request(sample, text)
+                log.info("synthesize_profile [luxtts] (%s): %r", profile.id, text[:60])
+                return pcm, rate
+            log.info(
+                "synthesize_profile [luxtts] (%s): %d chars -> %d chunks",
+                profile.id, len(text), len(chunks),
+            )
+            parts: list[np.ndarray] = []
+            rate = 48000
+            for i, chunk in enumerate(chunks, 1):
+                log.info("luxtts chunk %d/%d (%d chars)", i, len(chunks), len(chunk))
+                pcm, rate = await self._request(sample, chunk)
+                parts.append(np.frombuffer(pcm, dtype=np.float32))
+        audio = chunking.crossfade_concat(parts, rate)
+        return audio.tobytes(), rate
 
     def invalidate_profile(self, profile_id: str) -> None:
         pass  # the worker caches prompts by sample path
