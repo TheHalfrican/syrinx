@@ -108,12 +108,14 @@ component IconBtn inherits Rectangle {
         color: accent ? Theme.gen-fg : (active ? Theme.acc : Theme.btn-fg);
         horizontal-alignment: center; vertical-alignment: center;
     }
-    // tooltip — right-aligned above the button so card clipping can't cut it
-    if tip != "" && ib.has-hover : Rectangle {
+    // tooltip — right-aligned above the button so card clipping can't cut it;
+    // fades in after a hover delay (state transition below), hides instantly
+    tipbox := Rectangle {
         x: root.width - self.width;
         y: -self.height - 5px;
         height: 20px;
         width: tl.preferred-width + 14px;
+        opacity: 0;
         background: win95 ? #ffffe1 : #10151be6;
         border-width: 1px; border-color: win95 ? #000000 : #ffffff33;
         border-radius: win95 ? 0px : 4px;
@@ -124,6 +126,13 @@ component IconBtn inherits Rectangle {
             vertical-alignment: center;
         }
     }
+    states [
+        tip-shown when ib.has-hover && tip != "" : {
+            tipbox.opacity: 1;
+            in { animate tipbox.opacity { duration: 100ms; delay: 1200ms; } }
+            out { animate tipbox.opacity { duration: 80ms; } }
+        }
+    ]
 }
 
 component VoiceCard inherits Rectangle {
@@ -267,7 +276,7 @@ component KokoroCard inherits Rectangle {
 }
 
 // --- a single row-menu entry ---
-component MenuItem inherits Rectangle {
+component RowMenuItem inherits Rectangle {
     in property <string> label;
     in property <color> tint: Theme.fg;
     in property <bool> enabled: true;
@@ -306,13 +315,13 @@ component RowMenu inherits Rectangle {
             if win95 : Bevel { width: 100%; height: 100%; }
             VerticalLayout {
                 padding: 3px;
-                MenuItem { label: "Play"; chosen => { root.play(); pop.close(); } }
-                MenuItem { label: "Regenerate"; chosen => { root.regen(); pop.close(); } }
-                MenuItem { label: "Export audio"; chosen => { root.export-audio(); pop.close(); } }
-                MenuItem { label: "Export package"; chosen => { root.export-package(); pop.close(); } }
-                MenuItem { label: "Apply effects"; enabled: false; }
+                RowMenuItem { label: "Play"; chosen => { root.play(); pop.close(); } }
+                RowMenuItem { label: "Regenerate"; chosen => { root.regen(); pop.close(); } }
+                RowMenuItem { label: "Export audio"; chosen => { root.export-audio(); pop.close(); } }
+                RowMenuItem { label: "Export package"; chosen => { root.export-package(); pop.close(); } }
+                RowMenuItem { label: "Apply effects"; enabled: false; }
                 Rectangle { height: 1px; background: Theme.brd; }
-                MenuItem { label: "Delete"; tint: #cc3b3b; chosen => { root.del(); pop.close(); } }
+                RowMenuItem { label: "Delete"; tint: #cc3b3b; chosen => { root.del(); pop.close(); } }
             }
         }
     }
@@ -911,25 +920,42 @@ export component AppWindow inherits Window {
                                                         del => { root.delete-hist(h.id); }
                                                     }
                                                 }
-                                                // message text — read-only, scrollable, selectable (Ctrl+C copies)
-                                                Rectangle {
-                                                    height: 48px;
-                                                    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
-                                                    border-radius: Theme.rad;
-                                                    background: Theme.name == "win95" ? #ffffff : Theme.pan-bg;
-                                                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
-                                                    hsv := ScrollView {
-                                                        x: 7px; y: 4px;
-                                                        width: parent.width - 14px; height: parent.height - 8px;
-                                                        viewport-width: self.visible-width;
-                                                        hti := TextInput {
-                                                            x: 0; y: 0;
-                                                            width: hsv.visible-width;
-                                                            height: max(hsv.visible-height, self.preferred-height);
-                                                            text: h.text;
-                                                            read-only: true;
-                                                            wrap: word-wrap; single-line: false;
-                                                            font-size: 11.5px; color: Theme.dim; font-family: Theme.font;
+                                                // message text — read-only, scrollable, selectable
+                                                // (Ctrl+C or right-click → Copy)
+                                                ContextMenuArea {
+                                                    Menu {
+                                                        MenuItem {
+                                                            title: "Copy";
+                                                            activated => { hti.copy(); }
+                                                        }
+                                                        MenuItem {
+                                                            title: "Copy all";
+                                                            activated => { hti.select-all(); hti.copy(); }
+                                                        }
+                                                        MenuItem {
+                                                            title: "Select all";
+                                                            activated => { hti.select-all(); }
+                                                        }
+                                                    }
+                                                    Rectangle {
+                                                        height: 48px;
+                                                        border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                                        border-radius: Theme.rad;
+                                                        background: Theme.name == "win95" ? #ffffff : Theme.pan-bg;
+                                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                                        hsv := ScrollView {
+                                                            x: 7px; y: 4px;
+                                                            width: parent.width - 14px; height: parent.height - 8px;
+                                                            viewport-width: self.visible-width;
+                                                            hti := TextInput {
+                                                                x: 0; y: 0;
+                                                                width: hsv.visible-width;
+                                                                height: max(hsv.visible-height, self.preferred-height);
+                                                                text: h.text;
+                                                                read-only: true;
+                                                                wrap: word-wrap; single-line: false;
+                                                                font-size: 11.5px; color: Theme.dim; font-family: Theme.font;
+                                                            }
                                                         }
                                                     }
                                                 }
