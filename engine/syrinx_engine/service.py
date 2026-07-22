@@ -47,6 +47,8 @@ class EngineInterface(ServiceInterface):
             self._llm.set_model(s.size)
         if (s := self._models.active_spec("stt")):
             self._stt.set_model(s.repos[0])
+        if (s := self._models.active_spec("voice")):
+            self._tts.set_clone_engine(s.engine)
         self._model_loaded = False
         self._next_gen_id = 1
         self._next_llm_id = 1
@@ -158,7 +160,12 @@ class EngineInterface(ServiceInterface):
         prof = self._profiles.get(voice_id)
         if prof is None:
             return "", "en"
-        return (prof.default_engine or prof.preset_engine or ""), (prof.language or "en")
+        if prof.voice_type == "cloned":
+            # unpinned cloned voices synthesize with the active clone engine
+            engine = prof.default_engine or self._tts.clone_engine
+        else:
+            engine = prof.preset_engine or ""
+        return engine, (prof.language or "en")
 
     @method()
     async def Transcribe(self, audio_path: "s") -> "s":  # noqa: F821
@@ -298,7 +305,9 @@ class EngineInterface(ServiceInterface):
             self._llm.set_model(s.size)
         elif s and category == "stt":
             self._stt.set_model(s.repos[0])
-        # "voice" active-switching lands with the TTS backends (Phase 2)
+        elif s and category == "voice":
+            # cloned profiles without a pinned default_engine follow this
+            self._tts.set_clone_engine(s.engine)
         return category
 
     # --- generation history --------------------------------------------

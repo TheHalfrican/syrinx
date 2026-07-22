@@ -28,6 +28,9 @@ BUILTIN_PRESET_ENGINE = "kokoro"
 DEFAULT_CLONE_ENGINE = os.environ.get("SYRINX_TTS_ENGINE", "qwen")
 if DEFAULT_CLONE_ENGINE == "kokoro":  # kokoro can't clone; fall back
     DEFAULT_CLONE_ENGINE = "qwen"
+# Engines capable of zero-shot cloning (preset-only engines can't be the
+# active clone engine, e.g. kokoro / qwen_custom_voice).
+CLONING_ENGINES = {"qwen", "luxtts", "chatterbox", "chatterbox_turbo", "tada"}
 
 
 class SpeechSynthesizer:
@@ -36,6 +39,17 @@ class SpeechSynthesizer:
         self._backends: dict[str, object] = {}
         self.backend = detect_device()  # exposed as the D-Bus Backend property
         self.supports_cloning = True
+        # Set from the Models tab ("Use" on a voice model). Profiles with an
+        # explicit default_engine override it; "" falls through to the env default.
+        self._clone_engine = ""
+
+    def set_clone_engine(self, engine: str) -> None:
+        self._clone_engine = engine if engine in CLONING_ENGINES else ""
+        log.info("active clone engine -> %r", self._clone_engine or DEFAULT_CLONE_ENGINE)
+
+    @property
+    def clone_engine(self) -> str:
+        return self._clone_engine or DEFAULT_CLONE_ENGINE
 
     def _be(self, engine: str):
         if engine not in self._backends:
@@ -69,12 +83,14 @@ class SpeechSynthesizer:
             return await self._be(engine).synthesize(text, prof.preset_voice_id)
 
         # cloned
-        be = self._be(prof.default_engine or DEFAULT_CLONE_ENGINE)
+        be = self._be(prof.default_engine or self.clone_engine)
         return await be.synthesize_profile(prof, text, instruct)
 
     async def clone(self, name: str, sample_path: str, ref_text: str = "") -> str:
         """Legacy CloneVoice: create a cloned profile with a single sample."""
-        pid = self._profiles.create(name, "cloned", default_engine=DEFAULT_CLONE_ENGINE)
+        # default_engine stays "" so the voice follows the active clone engine;
+        # UpdateProfile can pin one explicitly later.
+        pid = self._profiles.create(name, "cloned")
         self._profiles.add_sample(pid, sample_path, ref_text)
         return pid
 
