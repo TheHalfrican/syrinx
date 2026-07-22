@@ -15,6 +15,14 @@ import os
 import sys
 import tempfile
 
+# Reserve the real stdout for the JSON protocol: zipvoice/transformers print
+# progress lines ("Loading model on CPU", Whisper transcripts) straight to fd 1,
+# which would corrupt the line protocol. Keep a private dup for replies and
+# point fd 1 (and sys.stdout) at stderr so all stray output lands in the log.
+_PROTO = os.fdopen(os.dup(1), "w")
+os.dup2(2, 1)
+sys.stdout = sys.stderr
+
 import numpy as np
 
 _MODEL = None
@@ -33,20 +41,14 @@ def _load():
     print("luxtts-worker: model loaded", file=sys.stderr, flush=True)
 
 
-def _handle(req: dict) -> dict:
-    rid = req.get("id")
-    sample = req["sample"]
-    text = req["text"]
-    _load()
-    if sample not in _PROMPTS:
-        _PROMPTS[sample] = _MODEL.encode_prompt(prompt_audio=str(sample), duration=5, rms=0.01)
+def _synthesize(text: str, encode_dict: dict, speed: float):
     wav = _MODEL.generate_speech(
         text=text,
-        encode_dict=_PROMPTS[sample],
+        encode_dict=encode_dict,
         num_steps=4,
         guidance_scale=3.0,
         t_shift=0.5,
-        speed=1.0,
+        speed=speed,
         return_smooth=False,  # 48 kHz
     )
     try:
@@ -56,7 +58,36 @@ def _handle(req: dict) -> dict:
             wav = wav.detach().cpu().numpy()
     except Exception:
         pass
-    audio = np.asarray(wav).squeeze().astype(np.float32)
+    return np.asarray(wav).squeeze().astype(np.float32)
+
+
+def _handle(req: dict) -> dict:
+    rid = req.get("id")
+    sample = req["sample"]
+    text = req["text"]
+    _load()
+    if sample not in _PROMPTS:
+        _PROMPTS[sample] = _MODEL.encode_prompt(prompt_audio=str(sample), duration=5, rms=0.01)
+
+    # The duration predictor collapses on short texts: below ~7 latent frames the
+    # vocoder's conv kernel raises, and slightly above it the clip comes out
+    # implausibly truncated. Lower speed stretches the predicted duration, so
+    # retry down a speed ladder until the output is at least plausible speech.
+    min_samples = int(0.04 * len(text) * 48000)
+    audio = None
+    last_err = None
+    for speed in (1.0, 0.6, 0.4):
+        try:
+            audio = _synthesize(text, _PROMPTS[sample], speed)
+        except RuntimeError as e:
+            if "padded input size" not in str(e):
+                raise
+            last_err = e
+            continue
+        if audio.size >= min_samples:
+            break
+    if audio is None:
+        raise last_err
     out = os.path.join(tempfile.gettempdir(), f"luxtts-{rid}.raw")
     audio.tofile(out)
     return {"id": rid, "ok": True, "raw": out, "rate": 48000}
@@ -75,8 +106,8 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001
             print(f"luxtts-worker: error {e}", file=sys.stderr, flush=True)
             resp = {"id": rid, "ok": False, "error": str(e)}
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+        _PROTO.write(json.dumps(resp) + "\n")
+        _PROTO.flush()
 
 
 if __name__ == "__main__":

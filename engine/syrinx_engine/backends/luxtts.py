@@ -68,11 +68,17 @@ class LuxTTSBackend:
             payload = json.dumps({"id": rid, "sample": str(sample), "text": text}) + "\n"
             self._proc.stdin.write(payload.encode())
             await self._proc.stdin.drain()
-            line = await self._proc.stdout.readline()
-            if not line:
-                self._proc = None
-                raise RuntimeError("LuxTTS worker exited (see ~/.cache/syrinx-luxtts.log)")
-            resp = json.loads(line.decode())
+            while True:
+                line = await self._proc.stdout.readline()
+                if not line:
+                    self._proc = None
+                    raise RuntimeError("LuxTTS worker exited (see ~/.cache/syrinx-luxtts.log)")
+                try:
+                    resp = json.loads(line.decode())
+                    break
+                except json.JSONDecodeError:
+                    # stray library print that escaped the worker's redirect
+                    log.debug("luxtts worker noise: %s", line.decode(errors="replace").rstrip())
             if not resp.get("ok"):
                 raise RuntimeError(f"LuxTTS synth failed: {resp.get('error')}")
             raw_path = Path(resp["raw"])
