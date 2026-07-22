@@ -881,6 +881,9 @@ export component AppWindow inherits Window {
                                     VerticalLayout {
                                         spacing: 8px;
                                         for h[i] in history : Rectangle {
+                                            // fixed height so the ScrollView scrolls instead of
+                                            // squeezing cards into each other as history grows
+                                            height: 106px;
                                             border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad; background: Theme.card-bg;
                                             clip: true;
                                             if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
