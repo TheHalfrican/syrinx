@@ -21,7 +21,7 @@ def duration_of(pcm: bytes, sample_rate: int) -> float:
     return (len(pcm) // 4) / sample_rate if sample_rate else 0.0
 
 
-def envelope(pcm: bytes, n: int = 100) -> list:
+def envelope(pcm: bytes, n: int = 300) -> list:
     """Downsample PCM to ``n`` peak-amplitude bars (0..1) for a static waveform."""
     samples = np.frombuffer(pcm, dtype=np.float32)
     if samples.size == 0:
