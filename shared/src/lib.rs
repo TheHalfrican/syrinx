@@ -76,6 +76,10 @@ pub trait Engine {
     /// personality). The result arrives via `LlmResult`.
     fn rewrite_profile(&self, voice_id: &str, text: &str) -> zbus::Result<u32>;
 
+    /// Clean a dictation transcript (fillers out, punctuation in); returns a
+    /// request id (0 if empty). The result arrives via `LlmResult`.
+    fn refine_transcript(&self, text: &str) -> zbus::Result<u32>;
+
     /// Delete a reference sample.
     fn delete_sample(&self, sample_id: &str) -> zbus::Result<()>;
 

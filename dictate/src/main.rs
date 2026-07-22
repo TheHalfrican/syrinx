@@ -121,15 +121,74 @@ fn stop_and_transcribe() -> Result<()> {
 
     let text = transcribe(&wav)?;
     let _ = fs::remove_file(&wav);
-    let text = text.trim();
+    let text = text.trim().to_string();
     if text.is_empty() {
         tracing::info!("(no speech detected)");
         return Ok(());
     }
     tracing::info!("transcribed: {text}");
-    paste(text)?;
+    let text = if refine_enabled() {
+        tracing::info!("refining transcript (LLM)…");
+        refine(&text)
+    } else {
+        text
+    };
+    paste(&text)?;
     // TODO(syrinx): hide the pill.
     Ok(())
+}
+
+/// Opt-in LLM cleanup of the transcript: `--refine` anywhere in the args or
+/// SYRINX_DICTATE_REFINE=1. Off by default — the LLM pass adds ~8–15 s on CPU.
+fn refine_enabled() -> bool {
+    std::env::args().any(|a| a == "--refine")
+        || std::env::var("SYRINX_DICTATE_REFINE").ok().as_deref() == Some("1")
+}
+
+/// Run the transcript through the engine's refinement LLM (fillers out,
+/// punctuation in). Any failure — no engine, timeout, empty output — falls
+/// back to the raw transcript so dictation never loses words.
+fn refine(raw: &str) -> String {
+    let attempt = || -> Result<String> {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            use futures_util::StreamExt;
+            let conn = zbus::Connection::session().await?;
+            let proxy = EngineProxy::new(&conn).await?;
+            // subscribe BEFORE the call so the result can't race past us
+            let mut results = proxy.receive_llm_result().await?;
+            let req_id = proxy.refine_transcript(raw).await?;
+            if req_id == 0 {
+                anyhow::bail!("engine rejected the transcript");
+            }
+            // generous timeout: the first call may load the model (~40 s on CPU)
+            let deadline = std::time::Duration::from_secs(180);
+            let refined = tokio::time::timeout(deadline, async {
+                while let Some(sig) = results.next().await {
+                    if let Ok(a) = sig.args() {
+                        if a.req_id == req_id {
+                            return a.text.to_string();
+                        }
+                    }
+                }
+                String::new()
+            })
+            .await
+            .unwrap_or_default();
+            Ok::<String, anyhow::Error>(refined)
+        })
+    };
+    match attempt() {
+        Ok(refined) if !refined.trim().is_empty() => refined.trim().to_string(),
+        Ok(_) => {
+            tracing::warn!("refinement returned nothing — pasting raw transcript");
+            raw.to_string()
+        }
+        Err(e) => {
+            tracing::warn!("refinement unavailable ({e}) — pasting raw transcript");
+            raw.to_string()
+        }
+    }
 }
 
 /// Ask the engine to transcribe the WAV over D-Bus.

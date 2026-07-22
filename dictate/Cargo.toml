@@ -15,8 +15,9 @@ path = "src/pill.rs"
 [dependencies]
 syrinx-shared.workspace = true
 zbus.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 anyhow.workspace = true
+futures-util = "0.3"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # The wlr-layer-shell overlay ("the pill"). Only the syrinx-dictate-pill bin
