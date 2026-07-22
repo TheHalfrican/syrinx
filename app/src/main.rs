@@ -55,6 +55,8 @@ enum Cmd {
     TrToggleRecord { system: bool },
     TrPickFile,
     TrRefine { text: String },
+    TrSaveCapture { id: String, text: String },
+    TrDeleteCapture { id: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -361,6 +363,25 @@ fn main() -> anyhow::Result<()> {
                 ui.set_tr_status("refining…".into());
                 let _ = tx.send(Cmd::TrRefine { text });
             }
+        });
+    }
+    // Captures (persisted transcripts): save-or-update decided by tr-capture-id.
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_tr_save_capture(move || {
+            let ui = ui_weak.unwrap();
+            let text = ui.get_tr_text().to_string();
+            if !text.trim().is_empty() {
+                let id = ui.get_tr_capture_id().to_string();
+                let _ = tx.send(Cmd::TrSaveCapture { id, text });
+            }
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_tr_delete_capture(move |id| {
+            let _ = tx.send(Cmd::TrDeleteCapture { id: id.to_string() });
         });
     }
     // Crop accepted: turn the dialog's zoom/pan into a square source-pixel rect.
@@ -973,6 +994,29 @@ fn set_history_model(ui: &AppWindow, items: Vec<HistItem>) {
     }
 }
 
+/// Build the captures model from the engine's ListCaptures JSON (newest first).
+fn build_captures(json: &str) -> Vec<CaptureItem> {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+    arr.iter()
+        .map(|c| {
+            let get = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("");
+            CaptureItem {
+                id: get("id").into(),
+                text: get("text").into(),
+                date: get("date").into(),
+            }
+        })
+        .collect()
+}
+
+fn set_captures_model(ui: &AppWindow, items: Vec<CaptureItem>) {
+    if let Some(vm) = ui.get_captures().as_any().downcast_ref::<VecModel<CaptureItem>>() {
+        vm.set_vec(items);
+    } else {
+        ui.set_captures(ModelRc::from(Rc::new(VecModel::from(items))));
+    }
+}
+
 async fn worker(
     ui: slint::Weak<AppWindow>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
@@ -992,6 +1036,7 @@ async fn worker(
         .map(|(i, n)| (i.to_string(), n.to_string()))
         .collect();
     let hist_items = build_history(&proxy.list_history().await.unwrap_or_else(|_| "[]".into()));
+    let capture_items = build_captures(&proxy.list_captures().await.unwrap_or_else(|_| "[]".into()));
     let mut avatar_cache: HashMap<String, RgbaBuf> = HashMap::new();
     let grid = bake_grid(&mut avatar_cache, grid);
     {
@@ -1005,6 +1050,7 @@ async fn worker(
                 ui.set_selected_voice_name(voice_name(&ui, &default_selected).into());
             }
             set_history_model(&ui, hist_items);
+            set_captures_model(&ui, capture_items);
         })
         .ok();
     }
@@ -1861,6 +1907,7 @@ async fn worker(
                                     let mode = if system { "system" } else { "mic" };
                                     ui.upgrade_in_event_loop(move |ui| {
                                         ui.set_tr_text("".into());
+                                        ui.set_tr_capture_id("".into()); // fresh source = new capture
                                         ui.set_tr_rec_mode(mode.into());
                                         ui.set_tr_recording(true);
                                         ui.set_tr_status("● recording 0:00".into());
@@ -1883,6 +1930,7 @@ async fn worker(
                                 pending_tr = id;
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_tr_text("".into());
+                                    ui.set_tr_capture_id("".into()); // fresh source = new capture
                                     ui.set_tr_busy(true);
                                     ui.set_tr_status("transcribing…".into());
                                 }).ok();
@@ -1900,6 +1948,49 @@ async fn worker(
                                 ui.set_tr_status("refine unavailable".into());
                             }).ok();
                         }
+                    }
+                }
+                Some(Cmd::TrSaveCapture { id, text }) => {
+                    // "" id = new row; otherwise replace the same entry in place
+                    let saved = if id.is_empty() {
+                        proxy.save_capture(&text).await.ok().filter(|s| !s.is_empty())
+                    } else {
+                        proxy.update_capture(&id, &text).await.ok().map(|()| id.clone())
+                    };
+                    match saved {
+                        Some(cid) => {
+                            let status = if id.is_empty() { "capture saved" } else { "capture updated" };
+                            let items = build_captures(
+                                &proxy.list_captures().await.unwrap_or_else(|_| "[]".into()),
+                            );
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_tr_capture_id(cid.into());
+                                ui.set_tr_status(status.into());
+                                set_captures_model(&ui, items);
+                            }).ok();
+                        }
+                        None => {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_status("save failed — engine unavailable".into());
+                            }).ok();
+                        }
+                    }
+                }
+                Some(Cmd::TrDeleteCapture { id }) => {
+                    match proxy.delete_capture(&id).await {
+                        Ok(_) => {
+                            let items = build_captures(
+                                &proxy.list_captures().await.unwrap_or_else(|_| "[]".into()),
+                            );
+                            ui.upgrade_in_event_loop(move |ui| {
+                                // the transcript stays in the box; it's just unsaved now
+                                if ui.get_tr_capture_id().as_str() == id {
+                                    ui.set_tr_capture_id("".into());
+                                }
+                                set_captures_model(&ui, items);
+                            }).ok();
+                        }
+                        Err(e) => tracing::error!("delete capture failed: {e}"),
                     }
                 }
                 Some(Cmd::CvPickAvatar) => {

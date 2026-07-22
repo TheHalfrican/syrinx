@@ -9,6 +9,7 @@ export struct VoiceItem {
     avatar: image, avatar-mode: string, has-avatar: bool,
 }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
+export struct CaptureItem { id: string, text: string, date: string }
 export struct ModelItem {
     id: string, display: string, size-label: string, description: string,
     downloaded: bool, downloading: bool, active: bool, supported: bool,
@@ -503,6 +504,8 @@ export component AppWindow inherits Window {
     in property <string> tr-rec-mode: "mic";   // which source is live
     in property <bool> tr-busy;                // transcribing or refining
     in property <string> tr-status;
+    in property <[CaptureItem]> captures;      // persisted transcripts (text only)
+    in-out property <string> tr-capture-id;    // loaded capture ("" = unsaved)
     // --- delete-voice confirm ---
     in-out property <string> del-id: "";
     in-out property <string> del-name: "";
@@ -591,6 +594,8 @@ export component AppWindow inherits Window {
     callback tr-toggle-record(string);  // "mic" | "system"
     callback tr-pick-file();
     callback tr-refine();
+    callback tr-save-capture();         // save new or update the loaded one
+    callback tr-delete-capture(string); // capture id
     callback apply-fx(string, int);  // history id, effect dropdown index
     callback toggle-loop(bool);
     callback set-volume(float);
@@ -793,11 +798,26 @@ export component AppWindow inherits Window {
                                                 font-size: 13.5px; color: Theme.dim; opacity: 0.6;
                                                 wrap: word-wrap; font-family: Theme.font;
                                             }
-                                            ti := TextInput {
+                                            // scrolls when the text outgrows the box: the viewport
+                                            // must be sized explicitly or ScrollView never scrolls
+                                            csv := ScrollView {
                                                 x: 2px; y: 2px; width: parent.width - 4px; height: parent.height - 4px;
-                                                text <=> root.text;
-                                                font-size: 13.5px; color: Theme.fg; wrap: word-wrap;
-                                                single-line: false;
+                                                viewport-width: self.visible-width;
+                                                viewport-height: max(self.visible-height, ti.preferred-height);
+                                                ti := TextInput {
+                                                    page-height: csv.visible-height;
+                                                    text <=> root.text;
+                                                    font-size: 13.5px; color: Theme.fg; wrap: word-wrap;
+                                                    single-line: false;
+                                                    // keep the caret in view while typing
+                                                    cursor-position-changed(cpos) => {
+                                                        if (cpos.y + csv.viewport-y < 0px) {
+                                                            csv.viewport-y = min(0px, max(csv.visible-height - self.height, -cpos.y));
+                                                        } else if (cpos.y + csv.viewport-y > csv.visible-height - 20px) {
+                                                            csv.viewport-y = min(0px, max(csv.visible-height - self.height, csv.visible-height - cpos.y - 20px));
+                                                        }
+                                                    }
+                                                }
                                             }
                                             cmenu := PopupWindow {
                                                 x: parent.ctx-x; y: parent.ctx-y;
@@ -1096,14 +1116,21 @@ export component AppWindow inherits Window {
                                                         x: 7px; y: 4px;
                                                         width: parent.width - 14px; height: parent.height - 8px;
                                                         viewport-width: self.visible-width;
+                                                        viewport-height: max(self.visible-height, hti.preferred-height);
                                                         hti := TextInput {
-                                                            x: 0; y: 0;
-                                                            width: hsv.visible-width;
-                                                            height: max(hsv.visible-height, self.preferred-height);
+                                                            page-height: hsv.visible-height;
                                                             text: h.text;
                                                             read-only: true;
                                                             wrap: word-wrap; single-line: false;
                                                             font-size: 11.5px; color: Theme.dim; font-family: Theme.font;
+                                                            // drag-select past the edge scrolls to follow
+                                                            cursor-position-changed(cpos) => {
+                                                                if (cpos.y + hsv.viewport-y < 0px) {
+                                                                    hsv.viewport-y = min(0px, max(hsv.visible-height - self.height, -cpos.y));
+                                                                } else if (cpos.y + hsv.viewport-y > hsv.visible-height - 20px) {
+                                                                    hsv.viewport-y = min(0px, max(hsv.visible-height - self.height, hsv.visible-height - cpos.y - 20px));
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     ctxpop := PopupWindow {
@@ -1141,117 +1168,254 @@ export component AppWindow inherits Window {
                     }
 
                     // ---- Transcription workspace ----
-                    if tab == "stt" : VerticalLayout {
-                        padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 12px;
-                        // sources
-                        HorizontalLayout {
-                            spacing: 8px;
-                            TBtn {
-                                label: tr-recording && tr-rec-mode == "mic" ? "■ Stop" : "● Record mic";
-                                generate: tr-recording && tr-rec-mode == "mic";
-                                clicked => { if (!tr-busy) { root.tr-toggle-record("mic"); } }
-                            }
-                            TBtn {
-                                label: tr-recording && tr-rec-mode == "system" ? "■ Stop" : "◉ Record system";
-                                generate: tr-recording && tr-rec-mode == "system";
-                                clicked => { if (!tr-busy) { root.tr-toggle-record("system"); } }
-                            }
-                            TBtn {
-                                label: "⇪ Import audio…";
-                                clicked => { if (!tr-busy && !tr-recording) { root.tr-pick-file(); } }
-                            }
-                            Rectangle {}
-                            Text {
-                                text: tr-status; font-size: 11px; font-family: Theme.mono;
-                                color: Theme.dim; vertical-alignment: center;
-                            }
-                        }
-                        // transcript — editable, scrollable, right-click menu
-                        Rectangle {
-                            vertical-stretch: 1;
-                            property <length> ctx-x;
-                            property <length> ctx-y;
-                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
-                            border-radius: Theme.rad;
-                            background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
-                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
-                            trta := TouchArea {
-                                pointer-event(e) => {
-                                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
-                                        ctx-x = trta.mouse-x;
-                                        ctx-y = trta.mouse-y;
-                                        trmenu.show();
+                    if tab == "stt" : HorizontalLayout {
+                        padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 14px;
+                        // captures rail — persisted transcripts (text only); click to load
+                        VerticalLayout {
+                            width: 210px; spacing: 10px;
+                            Text { text: "CAPTURES"; font-size: 12px; font-weight: 700; color: Theme.dim; }
+                            ScrollView {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    for c in captures : Rectangle {
+                                        // fixed height so the ScrollView scrolls (it squeezes
+                                        // flexible children instead)
+                                        height: 96px;
+                                        border-width: Theme.name == "win95" ? 0px : 1px;
+                                        border-color: c.id == tr-capture-id ? Theme.acc : Theme.brd;
+                                        border-radius: Theme.rad;
+                                        background: c.id == tr-capture-id ? Theme.acc-soft : Theme.card-bg;
+                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                        capta := TouchArea {
+                                            clicked => {
+                                                if (!tr-busy && !tr-recording) {
+                                                    tr-capture-id = c.id;
+                                                    tr-text = c.text;
+                                                }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            padding: 10px; spacing: 6px;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                Text {
+                                                    text: c.date; font-size: 9.5px; font-family: Theme.mono;
+                                                    color: Theme.dim; vertical-alignment: center; horizontal-stretch: 1;
+                                                }
+                                                Rectangle {
+                                                    width: 18px; height: 18px; border-radius: Theme.rad;
+                                                    background: cload.has-hover ? Theme.acc-soft : transparent;
+                                                    cload := TouchArea {
+                                                        clicked => {
+                                                            if (!tr-busy && !tr-recording) {
+                                                                tr-capture-id = c.id;
+                                                                tr-text = c.text;
+                                                            }
+                                                        }
+                                                    }
+                                                    Text { text: "✎"; font-size: 11px; color: Theme.dim;
+                                                           horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                                Rectangle {
+                                                    width: 18px; height: 18px; border-radius: Theme.rad;
+                                                    background: cdel.has-hover ? Theme.acc-soft : transparent;
+                                                    cdel := TouchArea { clicked => { root.tr-delete-capture(c.id); } }
+                                                    Text { text: "✕"; font-size: 11px; color: Theme.dim;
+                                                           horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                            }
+                                            // text — read-only, scrollable, selectable (same
+                                            // principle as the history-card message box)
+                                            Rectangle {
+                                                height: 52px;
+                                                property <length> ctx-x;
+                                                property <length> ctx-y;
+                                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                                border-radius: Theme.rad;
+                                                background: Theme.name == "win95" ? #ffffff : Theme.pan-bg;
+                                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                                ccta := TouchArea {
+                                                    pointer-event(e) => {
+                                                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                                            ctx-x = ccta.mouse-x;
+                                                            ctx-y = ccta.mouse-y;
+                                                            cctx.show();
+                                                        }
+                                                    }
+                                                }
+                                                capsv := ScrollView {
+                                                    x: 7px; y: 4px;
+                                                    width: parent.width - 14px; height: parent.height - 8px;
+                                                    viewport-width: self.visible-width;
+                                                    viewport-height: max(self.visible-height, capti.preferred-height);
+                                                    capti := TextInput {
+                                                        page-height: capsv.visible-height;
+                                                        text: c.text;
+                                                        read-only: true;
+                                                        wrap: word-wrap; single-line: false;
+                                                        font-size: 10.5px; color: Theme.dim; font-family: Theme.font;
+                                                        // drag-select past the edge scrolls to follow
+                                                        cursor-position-changed(cpos) => {
+                                                            if (cpos.y + capsv.viewport-y < 0px) {
+                                                                capsv.viewport-y = min(0px, max(capsv.visible-height - self.height, -cpos.y));
+                                                            } else if (cpos.y + capsv.viewport-y > capsv.visible-height - 20px) {
+                                                                capsv.viewport-y = min(0px, max(capsv.visible-height - self.height, capsv.visible-height - cpos.y - 20px));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                cctx := PopupWindow {
+                                                    x: parent.ctx-x; y: parent.ctx-y;
+                                                    width: 150px; height: 92px;
+                                                    close-policy: close-on-click-outside;
+                                                    Rectangle {
+                                                        background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                                        border-width: Theme.name == "win95" ? 0px : 1px;
+                                                        border-color: Theme.brd; border-radius: Theme.rad;
+                                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                                        VerticalLayout {
+                                                            padding: 3px;
+                                                            RowMenuItem { label: "Copy"; chosen => { capti.copy(); cctx.close(); } }
+                                                            RowMenuItem { label: "Copy all"; chosen => { capti.select-all(); capti.copy(); cctx.close(); } }
+                                                            RowMenuItem { label: "Select all"; chosen => { capti.select-all(); cctx.close(); } }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if captures.length == 0 : Text {
+                                        text: "— no captures yet —"; font-size: 10.5px; font-family: Theme.mono;
+                                        color: Theme.dim; horizontal-alignment: center;
                                     }
                                 }
                             }
-                            if tr-text == "" && !tr-busy : Text {
-                                x: 12px; y: 10px; width: parent.width - 24px;
-                                text: "Record from the microphone, tap the system audio, or import a file — the transcript lands here, live as it decodes.";
-                                font-size: 13px; color: Theme.dim; opacity: 0.6;
-                                wrap: word-wrap; font-family: Theme.font;
-                            }
-                            trsv := ScrollView {
-                                x: 12px; y: 10px;
-                                width: parent.width - 24px; height: parent.height - 26px;
-                                viewport-width: self.visible-width;
-                                trti := TextInput {
-                                    x: 0; y: 0;
-                                    width: trsv.visible-width;
-                                    height: max(trsv.visible-height, self.preferred-height);
-                                    text <=> tr-text;
-                                    wrap: word-wrap; single-line: false;
-                                    font-size: 13.5px; color: Theme.fg; font-family: Theme.font;
+                        }
+                        // workspace column
+                        VerticalLayout {
+                            spacing: 12px; horizontal-stretch: 1;
+                            // sources
+                            HorizontalLayout {
+                                spacing: 8px;
+                                TBtn {
+                                    label: tr-recording && tr-rec-mode == "mic" ? "■ Stop" : "● Record mic";
+                                    generate: tr-recording && tr-rec-mode == "mic";
+                                    clicked => { if (!tr-busy) { root.tr-toggle-record("mic"); } }
+                                }
+                                TBtn {
+                                    label: tr-recording && tr-rec-mode == "system" ? "■ Stop" : "◉ Record system";
+                                    generate: tr-recording && tr-rec-mode == "system";
+                                    clicked => { if (!tr-busy) { root.tr-toggle-record("system"); } }
+                                }
+                                TBtn {
+                                    label: "⇪ Import audio…";
+                                    clicked => { if (!tr-busy && !tr-recording) { root.tr-pick-file(); } }
+                                }
+                                Rectangle {}
+                                Text {
+                                    text: tr-status; font-size: 11px; font-family: Theme.mono;
+                                    color: Theme.dim; vertical-alignment: center;
                                 }
                             }
-                            // working marquee while transcribing / refining
-                            if tr-busy : Rectangle {
-                                x: 12px; width: parent.width - 24px;
-                                y: parent.height - 10px; height: 4px;
-                                border-radius: 2px; background: Theme.chip-bg; clip: true;
-                                Rectangle {
-                                    height: 100%; width: parent.width * 0.35;
-                                    border-radius: 2px; background: Theme.gen-bg;
-                                    x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
+                            // transcript — editable, scrollable, right-click menu
+                            Rectangle {
+                                vertical-stretch: 1;
+                                property <length> ctx-x;
+                                property <length> ctx-y;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad;
+                                background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                trta := TouchArea {
+                                    pointer-event(e) => {
+                                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                            ctx-x = trta.mouse-x;
+                                            ctx-y = trta.mouse-y;
+                                            trmenu.show();
+                                        }
+                                    }
                                 }
-                            }
-                            trmenu := PopupWindow {
-                                x: parent.ctx-x; y: parent.ctx-y;
-                                width: 150px; height: 120px;
-                                close-policy: close-on-click-outside;
-                                Rectangle {
-                                    background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
-                                    border-width: Theme.name == "win95" ? 0px : 1px;
-                                    border-color: Theme.brd; border-radius: Theme.rad;
-                                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
-                                    VerticalLayout {
-                                        padding: 3px;
-                                        RowMenuItem { label: "Cut"; chosen => { trti.cut(); trmenu.close(); } }
-                                        RowMenuItem { label: "Copy"; chosen => { trti.copy(); trmenu.close(); } }
-                                        RowMenuItem { label: "Paste"; chosen => { trti.paste(); trmenu.close(); } }
-                                        RowMenuItem { label: "Select all"; chosen => { trti.select-all(); trmenu.close(); } }
+                                if tr-text == "" && !tr-busy : Text {
+                                    x: 12px; y: 10px; width: parent.width - 24px;
+                                    text: "Record from the microphone, tap the system audio, or import a file — the transcript lands here, live as it decodes.";
+                                    font-size: 13px; color: Theme.dim; opacity: 0.6;
+                                    wrap: word-wrap; font-family: Theme.font;
+                                }
+                                trsv := ScrollView {
+                                    x: 12px; y: 10px;
+                                    width: parent.width - 24px; height: parent.height - 26px;
+                                    viewport-width: self.visible-width;
+                                    viewport-height: max(self.visible-height, trti.preferred-height);
+                                    trti := TextInput {
+                                        page-height: trsv.visible-height;
+                                        text <=> tr-text;
+                                        wrap: word-wrap; single-line: false;
+                                        font-size: 13.5px; color: Theme.fg; font-family: Theme.font;
+                                        // keep the caret in view while typing
+                                        cursor-position-changed(cpos) => {
+                                            if (cpos.y + trsv.viewport-y < 0px) {
+                                                trsv.viewport-y = min(0px, max(trsv.visible-height - self.height, -cpos.y));
+                                            } else if (cpos.y + trsv.viewport-y > trsv.visible-height - 20px) {
+                                                trsv.viewport-y = min(0px, max(trsv.visible-height - self.height, trsv.visible-height - cpos.y - 20px));
+                                            }
+                                        }
+                                    }
+                                }
+                                // working marquee while transcribing / refining
+                                if tr-busy : Rectangle {
+                                    x: 12px; width: parent.width - 24px;
+                                    y: parent.height - 10px; height: 4px;
+                                    border-radius: 2px; background: Theme.chip-bg; clip: true;
+                                    Rectangle {
+                                        height: 100%; width: parent.width * 0.35;
+                                        border-radius: 2px; background: Theme.gen-bg;
+                                        x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
+                                    }
+                                }
+                                trmenu := PopupWindow {
+                                    x: parent.ctx-x; y: parent.ctx-y;
+                                    width: 150px; height: 120px;
+                                    close-policy: close-on-click-outside;
+                                    Rectangle {
+                                        background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                        border-width: Theme.name == "win95" ? 0px : 1px;
+                                        border-color: Theme.brd; border-radius: Theme.rad;
+                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                        VerticalLayout {
+                                            padding: 3px;
+                                            RowMenuItem { label: "Cut"; chosen => { trti.cut(); trmenu.close(); } }
+                                            RowMenuItem { label: "Copy"; chosen => { trti.copy(); trmenu.close(); } }
+                                            RowMenuItem { label: "Paste"; chosen => { trti.paste(); trmenu.close(); } }
+                                            RowMenuItem { label: "Select all"; chosen => { trti.select-all(); trmenu.close(); } }
+                                        }
                                     }
                                 }
                             }
-                        }
-                        // actions
-                        HorizontalLayout {
-                            spacing: 10px;
-                            Text {
-                                text: "Transcript is editable — fix names before using it.";
-                                font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
-                                vertical-alignment: center;
-                            }
-                            Rectangle {}
-                            TBtn {
-                                label: tr-busy ? "…" : "✎ Refine with LLM";
-                                clicked => { if (!tr-busy && tr-text != "") { root.tr-refine(); } }
-                            }
-                            TBtn {
-                                label: "✦ Use in composer"; generate: true; min-width: 150px;
-                                clicked => {
-                                    if (tr-text != "") {
-                                        root.text = tr-text;
-                                        tab = "tts";
+                            // actions
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: "Transcript is editable — fix names before using it.";
+                                    font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {}
+                                TBtn {
+                                    label: tr-capture-id == "" ? "▤ Save capture" : "▤ Update capture";
+                                    clicked => { if (!tr-busy && tr-text != "") { root.tr-save-capture(); } }
+                                }
+                                TBtn {
+                                    label: tr-busy ? "…" : "✎ Refine with LLM";
+                                    clicked => { if (!tr-busy && tr-text != "") { root.tr-refine(); } }
+                                }
+                                TBtn {
+                                    label: "✦ Use in composer"; generate: true; min-width: 150px;
+                                    clicked => {
+                                        if (tr-text != "") {
+                                            root.text = tr-text;
+                                            tab = "tts";
+                                        }
                                     }
                                 }
                             }
@@ -1462,16 +1626,28 @@ export component AppWindow inherits Window {
                             vertical-stretch: 1;
                             background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
                             border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
-                            clip: true;
                             if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
                             if cv-transcript == "" : Text {
                                 x: 10px; y: 8px; text: "What the reference clip says (required for cloning).";
                                 font-size: 12px; color: Theme.dim; opacity: 0.6; font-family: Theme.font;
                             }
-                            TextInput {
+                            cvtsv := ScrollView {
                                 x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px;
-                                text <=> cv-transcript; font-size: 13px; color: Theme.fg; font-family: Theme.font;
-                                wrap: word-wrap; single-line: false;
+                                viewport-width: self.visible-width;
+                                viewport-height: max(self.visible-height, cvtti.preferred-height);
+                                cvtti := TextInput {
+                                    page-height: cvtsv.visible-height;
+                                    text <=> cv-transcript; font-size: 13px; color: Theme.fg; font-family: Theme.font;
+                                    wrap: word-wrap; single-line: false;
+                                    // keep the caret in view while typing
+                                    cursor-position-changed(cpos) => {
+                                        if (cpos.y + cvtsv.viewport-y < 0px) {
+                                            cvtsv.viewport-y = min(0px, max(cvtsv.visible-height - self.height, -cpos.y));
+                                        } else if (cpos.y + cvtsv.viewport-y > cvtsv.visible-height - 20px) {
+                                            cvtsv.viewport-y = min(0px, max(cvtsv.visible-height - self.height, cvtsv.visible-height - cpos.y - 20px));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
