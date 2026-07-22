@@ -17,7 +17,7 @@ from .profiles import ProfileStore
 from .history import HistoryStore
 from .llm import PersonalityLLM
 from .models import ModelManager, spec as model_spec, detect_hardware
-from . import audio
+from . import audio, effects
 
 log = logging.getLogger("syrinx.engine.service")
 
@@ -57,6 +57,7 @@ class EngineInterface(ServiceInterface):
         self._ctl: _PlayCtl | None = None  # current playback control
         self._play_epoch = 0               # latest playback request wins
         self._volume = 1.0                 # playback gain 0..1 (SetVolume)
+        self._active_effect = ""           # preset id applied to generations (SetEffect)
 
     @property
     def backend_name(self) -> str:
@@ -86,6 +87,11 @@ class EngineInterface(ServiceInterface):
                 self.SpeakStarted(gen_id)
                 self.GenerationProgress(gen_id, "synthesizing", 0.0)
                 pcm, rate = await self._tts.synthesize(text, voice_id)
+                if self._active_effect:
+                    self.GenerationProgress(gen_id, "effects", 0.9)
+                    pcm = await asyncio.to_thread(
+                        effects.apply_preset, pcm, rate, self._active_effect
+                    )
                 title = await self._voice_display_name(voice_id)
                 engine, lang = self._voice_meta(voice_id)
                 duration = audio.duration_of(pcm, rate)
@@ -107,8 +113,10 @@ class EngineInterface(ServiceInterface):
                 )
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 log.exception("Speak %d failed", gen_id)
+                # surface the failure to the app instead of a silent vanish
+                self.GenerationProgress(gen_id, f"error: {str(e)[:200]}", 0.0)
             finally:
                 self.SpeakEnded(gen_id)
                 self._tasks.pop(gen_id, None)
@@ -380,6 +388,37 @@ class EngineInterface(ServiceInterface):
     @method()
     async def SetVolume(self, volume: "d") -> None:  # noqa: F821
         self._volume = max(0.0, min(1.0, volume))
+
+    # --- effects --------------------------------------------------------
+
+    @method()
+    async def ListEffectPresets(self) -> "s":  # noqa: F821
+        return json.dumps(effects.list_presets())
+
+    @method()
+    async def SetEffect(self, preset_id: "s") -> None:  # noqa: F821
+        self._active_effect = preset_id if preset_id in effects.PRESETS else ""
+        log.info("active effect -> %r", self._active_effect or "none")
+
+    @method()
+    async def ApplyHistoryEffects(self, hid: "s", preset_id: "s") -> "s":  # noqa: F821
+        """Re-process a stored clip through a preset; saves a NEW history row."""
+        item = self._history.get(hid)
+        if item is None or preset_id not in effects.PRESETS:
+            return ""
+        path = self._history.audio_abs_path(hid)
+        pcm, rate = effects.load_wav(path)
+        pcm = await asyncio.to_thread(effects.apply_preset, pcm, rate, preset_id)
+        new = self._history.save_clip(
+            voice_id=item.voice_id,
+            voice_name=f"{item.voice_name} · {effects.preset_name(preset_id)}",
+            text=item.text,
+            pcm=pcm,
+            sample_rate=rate,
+            engine=item.engine,
+            language=item.language,
+        )
+        return new.id
 
     @method()
     async def StarHistory(self, hid: "s", starred: "b") -> None:  # noqa: F821

@@ -14,6 +14,7 @@ dependencies = [
     "kokoro>=0.9.2",
     "misaki[en]",         # English G2P for Kokoro
     "faster-whisper",     # STT for dictation (CTranslate2 — CPU-fast, CUDA on the 4090)
+    "pedalboard",         # post-processing effects (Voicebox-parity presets)
 ]
 
 [project.optional-dependencies]
