@@ -11,6 +11,9 @@ zbus.workspace = true
 futures-util = "0.3"
 serde_json = "1"
 tokio = { workspace = true, features = ["process", "time"] }
+# avatar thumbnails: decode + crop + high-quality downscale (the GPU's plain
+# bilinear sampling pixelates 4K photos squeezed into small circles)
+image = "0.25"
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

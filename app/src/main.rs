@@ -351,14 +351,29 @@ fn main() -> anyhow::Result<()> {
             if path.is_empty() || w < 1.0 || h < 1.0 {
                 return;
             }
-            // mirror the dialog viewport's aspect: circle 220x220, panel 132x220
+            // mirror the dialog viewport's aspect: circle 220x220, panel 132x220.
+            // The math runs in preview pixels (crop-src is downscaled), then the
+            // rect is scaled back to ORIGINAL photo pixels for storage.
             let mode = ui.get_crop_mode().to_string();
             let (vw, vh): (f32, f32) = if mode == "panel" { (132.0, 220.0) } else { (220.0, 220.0) };
             let cw = (w.min(h * vw / vh) / ui.get_crop_zoom().max(1.0)).round();
             let ch = (cw * vh / vw).round();
-            let sx = (ui.get_crop_cx() * w - cw / 2.0).clamp(0.0, (w - cw).max(0.0)).round() as i32;
-            let sy = (ui.get_crop_cy() * h - ch / 2.0).clamp(0.0, (h - ch).max(0.0)).round() as i32;
-            let _ = tx.send(Cmd::CvStageAvatar { path, mode, sx, sy, sw: cw as i32, sh: ch as i32 });
+            let sx = (ui.get_crop_cx() * w - cw / 2.0).clamp(0.0, (w - cw).max(0.0));
+            let sy = (ui.get_crop_cy() * h - ch / 2.0).clamp(0.0, (h - ch).max(0.0));
+            let (fw, fh) = (ui.get_crop_full_w() as f32, ui.get_crop_full_h() as f32);
+            let scale = if fw > 0.0 && w > 0.0 { fw / w } else { 1.0 };
+            let fsw = (cw * scale).round().min(fw).max(1.0);
+            let fsh = (ch * scale).round().min(fh.max(1.0)).max(1.0);
+            let fsx = (sx * scale).round().clamp(0.0, (fw - fsw).max(0.0));
+            let fsy = (sy * scale).round().clamp(0.0, (fh - fsh).max(0.0));
+            let _ = tx.send(Cmd::CvStageAvatar {
+                path,
+                mode,
+                sx: fsx as i32,
+                sy: fsy as i32,
+                sw: fsw as i32,
+                sh: fsh as i32,
+            });
         });
     }
     {
@@ -421,17 +436,61 @@ struct VoiceData {
     avatar_sh: i32,
 }
 
-/// UI-thread conversion: load each avatar photo and build the model rows.
-fn to_voice_items(data: Vec<VoiceData>) -> Vec<VoiceItem> {
+/// Baked avatar pixels: RGBA bytes + dimensions (Send-able, unlike slint::Image).
+type RgbaBuf = (Vec<u8>, u32, u32);
+
+/// Decode a photo, apply the crop rect, and downscale with a proper filter.
+/// The GPU's plain bilinear sampling turns a 4K photo minified into a small
+/// circle into visible pixelation — so we hand it a ≤400px thumbnail instead.
+/// Cached by path + mtime + rect since grids rebake on every refresh.
+fn bake_avatar_rgba(
+    cache: &mut HashMap<String, RgbaBuf>,
+    path: &str,
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+) -> Option<RgbaBuf> {
+    if path.is_empty() || sw <= 0 {
+        return None;
+    }
+    let sh = if sh > 0 { sh } else { sw };
+    let mtime = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let key = format!("{path}|{mtime}|{sx},{sy},{sw},{sh}");
+    if let Some(b) = cache.get(&key) {
+        return Some(b.clone());
+    }
+    let img = image::open(path).ok()?;
+    let (w, h) = (img.width(), img.height());
+    let cx = (sx.max(0) as u32).min(w.saturating_sub(1));
+    let cy = (sy.max(0) as u32).min(h.saturating_sub(1));
+    let cw = (sw as u32).min(w - cx).max(1);
+    let ch = (sh as u32).min(h - cy).max(1);
+    let thumb = img.crop_imm(cx, cy, cw, ch).thumbnail(400, 400);
+    let rgba = thumb.to_rgba8();
+    let buf = (rgba.as_raw().clone(), rgba.width(), rgba.height());
+    cache.insert(key, buf.clone());
+    Some(buf)
+}
+
+/// UI-thread half of avatar handling: turn baked RGBA into a slint Image.
+fn rgba_to_image(buf: &RgbaBuf) -> slint::Image {
+    let pb = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&buf.0, buf.1, buf.2);
+    slint::Image::from_rgba8(pb)
+}
+
+/// UI-thread conversion of pre-baked grid data into model rows.
+fn to_voice_items(data: Vec<(VoiceData, Option<RgbaBuf>)>) -> Vec<VoiceItem> {
     data.into_iter()
-        .map(|d| {
-            let (avatar, side) = if !d.avatar_path.is_empty() && d.avatar_side > 0 {
-                match slint::Image::load_from_path(std::path::Path::new(&d.avatar_path)) {
-                    Ok(img) => (img, d.avatar_side),
-                    Err(_) => (Default::default(), 0),
-                }
-            } else {
-                (Default::default(), 0)
+        .map(|(d, baked)| {
+            let (avatar, has) = match &baked {
+                Some(b) => (rgba_to_image(b), true),
+                None => (Default::default(), false),
             };
             VoiceItem {
                 id: d.id.into(),
@@ -442,11 +501,23 @@ fn to_voice_items(data: Vec<VoiceData>) -> Vec<VoiceItem> {
                 has_personality: d.has_personality,
                 avatar,
                 avatar_mode: if d.avatar_mode.is_empty() { "circle".into() } else { d.avatar_mode.into() },
-                avatar_sx: d.avatar_sx,
-                avatar_sy: d.avatar_sy,
-                avatar_side: side,
-                avatar_sh: if d.avatar_sh > 0 { d.avatar_sh } else { side },
+                has_avatar: has,
             }
+        })
+        .collect()
+}
+
+/// Worker-side pairing of grid entries with their baked avatar thumbnails.
+fn bake_grid(
+    cache: &mut HashMap<String, RgbaBuf>,
+    grid: Vec<VoiceData>,
+) -> Vec<(VoiceData, Option<RgbaBuf>)> {
+    grid.into_iter()
+        .map(|d| {
+            let baked = bake_avatar_rgba(
+                cache, &d.avatar_path, d.avatar_sx, d.avatar_sy, d.avatar_side, d.avatar_sh,
+            );
+            (d, baked)
         })
         .collect()
 }
@@ -760,10 +831,15 @@ async fn refresh_models(
 }
 
 /// Rebuild the voice-card grid from the engine (after create/edit/delete/import).
-async fn refresh_grid(ui: &slint::Weak<AppWindow>, proxy: &EngineProxy<'_>) {
+async fn refresh_grid(
+    ui: &slint::Weak<AppWindow>,
+    proxy: &EngineProxy<'_>,
+    cache: &mut HashMap<String, RgbaBuf>,
+) {
     let raw = proxy.list_voices().await.unwrap_or_default();
     let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
     let GridData { grid, .. } = build_grid(raw, &pj);
+    let grid = bake_grid(cache, grid);
     ui.upgrade_in_event_loop(move |ui| {
         ui.set_voices(ModelRc::from(Rc::new(VecModel::from(to_voice_items(grid)))));
     })
@@ -889,6 +965,8 @@ async fn worker(
         .map(|(i, n)| (i.to_string(), n.to_string()))
         .collect();
     let hist_items = build_history(&proxy.list_history().await.unwrap_or_else(|_| "[]".into()));
+    let mut avatar_cache: HashMap<String, RgbaBuf> = HashMap::new();
+    let grid = bake_grid(&mut avatar_cache, grid);
     {
         ui.upgrade_in_event_loop(move |ui| {
             ui.set_backend(backend.into());
@@ -1280,7 +1358,7 @@ async fn worker(
                                         }
                                     }
                                 }
-                                refresh_grid(&ui, &proxy).await;
+                                refresh_grid(&ui, &proxy, &mut avatar_cache).await;
                                 let pid2 = pid.clone();
                                 let name2 = name.clone();
                                 let hp = !personality.trim().is_empty();
@@ -1293,7 +1371,7 @@ async fn worker(
                                     ui.set_cv_transcript("".into());
                                     ui.set_cv_sample_label("".into());
                                     ui.set_cv_model_index(0);
-                                    ui.set_cv_avatar_side(0);
+                                    ui.set_cv_has_avatar(false);
                                     if ui.get_selected_voice().as_str() == pid2 {
                                         ui.set_selected_voice_name(name2.into());
                                         ui.set_selected_has_personality(hp);
@@ -1330,6 +1408,7 @@ async fn worker(
                                     .zip(kokoro_names.iter())
                                     .map(|(i, n)| (i.to_string(), n.to_string()))
                                     .collect();
+                                let grid = bake_grid(&mut avatar_cache, grid);
                                 cv_sample = None;
                                 ui.upgrade_in_event_loop(move |ui| {
                                     ui.set_cv_creating(false);
@@ -1340,7 +1419,7 @@ async fn worker(
                                     ui.set_cv_transcript("".into());
                                     ui.set_cv_sample_label("".into());
                                     ui.set_cv_model_index(0);
-                                    ui.set_cv_avatar_side(0);
+                                    ui.set_cv_has_avatar(false);
                                     ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(kokoro_names))));
                                     ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
                                     ui.set_voices(ModelRc::from(Rc::new(VecModel::from(to_voice_items(grid)))));
@@ -1400,7 +1479,7 @@ async fn worker(
                         ui.set_cv_transcript("".into());
                         ui.set_cv_edit_id("".into());
                         ui.set_cv_model_index(0);
-                        ui.set_cv_avatar_side(0);
+                        ui.set_cv_has_avatar(false);
                     }).ok();
                 }
                 Some(Cmd::GenerateInCharacter { text, voice }) => {
@@ -1485,7 +1564,7 @@ async fn worker(
                             // persisted per cloned profile
                             let patch = serde_json::json!({"language": code}).to_string();
                             proxy.update_profile(&voice, &patch).await.ok();
-                            refresh_grid(&ui, &proxy).await;
+                            refresh_grid(&ui, &proxy, &mut avatar_cache).await;
                         }
                     }
                 }
@@ -1584,19 +1663,20 @@ async fn worker(
                                 .map(|i| i as i32 + 1)
                                 .unwrap_or(0)
                         };
-                        // existing avatar for the modal preview
-                        let av_path = s("avatar_path");
+                        // existing avatar for the modal preview (baked thumbnail)
                         let av_mode = {
                             let m = s("avatar_mode");
                             if m.is_empty() { "circle".to_string() } else { m }
                         };
                         let iv = |k: &str| p.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                        let (av_sx, av_sy, av_side) =
-                            (iv("avatar_sx"), iv("avatar_sy"), iv("avatar_side"));
-                        let av_sh = {
-                            let sh = iv("avatar_sh");
-                            if sh > 0 { sh } else { av_side }
-                        };
+                        let av_baked = bake_avatar_rgba(
+                            &mut avatar_cache,
+                            &s("avatar_path"),
+                            iv("avatar_sx"),
+                            iv("avatar_sy"),
+                            iv("avatar_side"),
+                            iv("avatar_sh"),
+                        );
                         cv_edit = Some(id.clone());
                         cv_sample = None;
                         cv_avatar = None;
@@ -1609,20 +1689,13 @@ async fn worker(
                             ui.set_cv_transcript(transcript.into());
                             ui.set_cv_model_index(model_idx);
                             ui.set_cv_sample_label("".into());
-                            if av_side > 0 && !av_path.is_empty() {
-                                match slint::Image::load_from_path(std::path::Path::new(&av_path)) {
-                                    Ok(img) => {
-                                        ui.set_cv_avatar(img);
-                                        ui.set_cv_avatar_mode(av_mode.into());
-                                        ui.set_cv_avatar_sx(av_sx);
-                                        ui.set_cv_avatar_sy(av_sy);
-                                        ui.set_cv_avatar_side(av_side);
-                                        ui.set_cv_avatar_sh(av_sh);
-                                    }
-                                    Err(_) => ui.set_cv_avatar_side(0),
+                            match &av_baked {
+                                Some(b) => {
+                                    ui.set_cv_avatar(rgba_to_image(b));
+                                    ui.set_cv_avatar_mode(av_mode.into());
+                                    ui.set_cv_has_avatar(true);
                                 }
-                            } else {
-                                ui.set_cv_avatar_side(0);
+                                None => ui.set_cv_has_avatar(false),
                             }
                             ui.set_cv_edit_id(id.into());
                             ui.set_cv_open(true);
@@ -1632,7 +1705,7 @@ async fn worker(
                 Some(Cmd::DeleteVoice { id }) => {
                     match proxy.delete_profile(&id).await {
                         Ok(_) => {
-                            refresh_grid(&ui, &proxy).await;
+                            refresh_grid(&ui, &proxy, &mut avatar_cache).await;
                             ui.upgrade_in_event_loop(move |ui| {
                                 if ui.get_selected_voice().as_str() == id {
                                     // fall back to the first bundled preset
@@ -1655,32 +1728,43 @@ async fn worker(
                         .await
                     {
                         let path = handle.path().to_string_lossy().to_string();
-                        ui.upgrade_in_event_loop(move |ui| {
-                            match slint::Image::load_from_path(std::path::Path::new(&path)) {
-                                Ok(img) => {
-                                    ui.set_crop_src(img);
+                        // decode once, remember the real size, and hand the
+                        // dialog a filtered ≤1200px preview (max zoom 4x on a
+                        // 220px viewport needs 880px — stays sharp)
+                        match image::open(&path) {
+                            Ok(img) => {
+                                let (fw, fh) = (img.width(), img.height());
+                                let preview = if fw.max(fh) > 1200 {
+                                    img.thumbnail(1200, 1200)
+                                } else {
+                                    img
+                                };
+                                let rgba = preview.to_rgba8();
+                                let buf: RgbaBuf = (rgba.as_raw().clone(), rgba.width(), rgba.height());
+                                ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_crop_src(rgba_to_image(&buf));
+                                    ui.set_crop_full_w(fw as i32);
+                                    ui.set_crop_full_h(fh as i32);
                                     ui.set_crop_path(path.into());
                                     ui.set_crop_zoom(1.0);
                                     ui.set_crop_cx(0.5);
                                     ui.set_crop_cy(0.5);
                                     ui.set_crop_stage("mode".into());
                                     ui.set_crop_open(true);
-                                }
-                                Err(e) => tracing::error!("could not load image: {e}"),
+                                }).ok();
                             }
-                        }).ok();
+                            Err(e) => tracing::error!("could not load image: {e}"),
+                        }
                     }
                 }
                 Some(Cmd::CvStageAvatar { path, mode, sx, sy, sw, sh }) => {
                     cv_avatar = Some((path.clone(), mode.clone(), sx, sy, sw, sh));
+                    let baked = bake_avatar_rgba(&mut avatar_cache, &path, sx, sy, sw, sh);
                     ui.upgrade_in_event_loop(move |ui| {
-                        if let Ok(img) = slint::Image::load_from_path(std::path::Path::new(&path)) {
-                            ui.set_cv_avatar(img);
+                        if let Some(b) = baked {
+                            ui.set_cv_avatar(rgba_to_image(&b));
                             ui.set_cv_avatar_mode(mode.into());
-                            ui.set_cv_avatar_sx(sx);
-                            ui.set_cv_avatar_sy(sy);
-                            ui.set_cv_avatar_side(sw);
-                            ui.set_cv_avatar_sh(sh);
+                            ui.set_cv_has_avatar(true);
                         }
                     }).ok();
                 }
@@ -1694,7 +1778,7 @@ async fn worker(
                         match proxy.import_profile(&src).await {
                             Ok(pid) => {
                                 tracing::info!("imported voice {pid}");
-                                refresh_grid(&ui, &proxy).await;
+                                refresh_grid(&ui, &proxy, &mut avatar_cache).await;
                             }
                             Err(e) => tracing::error!("import voice failed: {e}"),
                         }

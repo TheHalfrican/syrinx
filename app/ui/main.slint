@@ -4,10 +4,9 @@ import { ScrollView } from "std-widgets.slint";
 
 export struct VoiceItem {
     id: string, name: string, desc: string, lang: string, kind: string, has-personality: bool,
-    // avatar photo + crop rect in source pixels (avatar-side = crop width;
-    // 0 = none). mode "circle" = big circle top-right (square crop);
-    // "panel" = the card's right third (tall crop, height avatar-sh).
-    avatar: image, avatar-mode: string, avatar-sx: int, avatar-sy: int, avatar-side: int, avatar-sh: int,
+    // avatar: pre-baked thumbnail (crop applied + downscaled in Rust — GPU
+    // minification of full-size photos pixelates). mode "circle" | "panel".
+    avatar: image, avatar-mode: string, has-avatar: bool,
 }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
 export struct ModelItem {
@@ -161,9 +160,8 @@ component VoiceCard inherits Rectangle {
     border-color: active ? Theme.acc : (ta.has-hover ? Theme.acc : Theme.brd);
     background: Theme.card-bg;
     // no clip: rounded clip forces a blurry offscreen layer (content is padded anyway)
-    property <bool> panel: v.avatar-mode == "panel" && v.avatar-side > 0;
-    property <bool> circ: v.avatar-mode != "panel" && v.avatar-side > 0;
-    property <int> crop-h: v.avatar-sh > 0 ? v.avatar-sh : v.avatar-side;  // pre-mode avatars
+    property <bool> panel: v.avatar-mode == "panel" && v.has-avatar;
+    property <bool> circ: v.avatar-mode != "panel" && v.has-avatar;
     ta := TouchArea { clicked => { root.clicked(); } }
     if win95 : Bevel { width: 100%; height: 100%; sunken: active; }
     HorizontalLayout {
@@ -194,17 +192,13 @@ component VoiceCard inherits Rectangle {
                 if circ : VerticalLayout {
                     alignment: start;
                     Rectangle {
-                        width: 62px; height: 62px; border-radius: 31px;
+                        width: 96px; height: 96px; border-radius: 48px;
                         border-width: 1px; border-color: Theme.brd;
                         clip: true;
                         Image {
                             width: 100%; height: 100%;
                             source: v.avatar;
-                            image-fit: fill;
-                            source-clip-x: v.avatar-sx;
-                            source-clip-y: v.avatar-sy;
-                            source-clip-width: v.avatar-side;
-                            source-clip-height: v.avatar-side;
+                            image-fit: cover;
                         }
                     }
                 }
@@ -221,10 +215,10 @@ component VoiceCard inherits Rectangle {
                 IconBtn { size: 24px; glyph-size: 11px; glyph: "✕"; tip: "Delete voice"; clicked => { root.delete-clicked(); } }
             }
         }
-        // RIGHT: panel avatar — the card's right third behind a divider
+        // RIGHT: panel avatar behind a divider
         if panel : Rectangle { width: 1px; background: Theme.brd; }
         if panel : Rectangle {
-            width: root.width / 3;
+            width: root.width * 0.4;
             clip: true;
             border-top-right-radius: Theme.rad;
             border-bottom-right-radius: Theme.rad;
@@ -232,10 +226,6 @@ component VoiceCard inherits Rectangle {
                 width: 100%; height: 100%;
                 source: v.avatar;
                 image-fit: cover;
-                source-clip-x: v.avatar-sx;
-                source-clip-y: v.avatar-sy;
-                source-clip-width: v.avatar-side;
-                source-clip-height: root.crop-h;
             }
         }
     }
@@ -548,18 +538,17 @@ export component AppWindow inherits Window {
     in-out property <string> cv-edit-id: "";   // non-empty = the modal edits this profile
     in property <[string]> cv-model-options: ["Follow active model"];
     in-out property <int> cv-model-index: 0;
-    // avatar preview in the modal (staged or existing)
+    // avatar preview in the modal (staged or existing; pre-baked thumbnail)
     in-out property <image> cv-avatar;
     in-out property <string> cv-avatar-mode: "circle";
-    in-out property <int> cv-avatar-sx: 0;
-    in-out property <int> cv-avatar-sy: 0;
-    in-out property <int> cv-avatar-side: 0;
-    in-out property <int> cv-avatar-sh: 0;
+    in-out property <bool> cv-has-avatar: false;
     // --- avatar crop dialog (shape choice, then zoom + pan) ---
     in-out property <bool> crop-open: false;
     in-out property <string> crop-stage: "mode";  // mode | crop
     in-out property <string> crop-mode: "circle"; // circle | panel
-    in-out property <image> crop-src;
+    in-out property <image> crop-src;             // downscaled preview of the photo
+    in-out property <int> crop-full-w: 0;         // original photo dimensions
+    in-out property <int> crop-full-h: 0;
     in-out property <string> crop-path: "";
     in-out property <float> crop-zoom: 1.0;   // 1..4
     in-out property <float> crop-cx: 0.5;     // crop centre in source UV
@@ -714,7 +703,7 @@ export component AppWindow inherits Window {
                                     // clear any stale edit-mode state before a fresh create
                                     cv-edit-id = ""; cv-model-index = 0;
                                     cv-lang-index = 0; cv-language = "en";
-                                    cv-avatar-side = 0;
+                                    cv-has-avatar = false;
                                     cv-open = true;
                                 } }
                             }
@@ -1361,22 +1350,18 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             spacing: 10px;
                             Rectangle {
-                                width: cv-avatar-mode == "panel" && cv-avatar-side > 0 ? 30px : 44px;
+                                width: cv-avatar-mode == "panel" && cv-has-avatar ? 30px : 44px;
                                 height: 44px;
-                                border-radius: cv-avatar-mode == "panel" && cv-avatar-side > 0 ? 5px : 22px;
+                                border-radius: cv-avatar-mode == "panel" && cv-has-avatar ? 5px : 22px;
                                 border-width: 1px; border-color: Theme.brd;
                                 background: Theme.chip-bg;
                                 clip: true;
-                                if cv-avatar-side > 0 : Image {
+                                if cv-has-avatar : Image {
                                     width: 100%; height: 100%;
                                     source: cv-avatar;
                                     image-fit: cover;
-                                    source-clip-x: cv-avatar-sx;
-                                    source-clip-y: cv-avatar-sy;
-                                    source-clip-width: cv-avatar-side;
-                                    source-clip-height: cv-avatar-sh > 0 ? cv-avatar-sh : cv-avatar-side;
                                 }
-                                if cv-avatar-side == 0 : Text {
+                                if !cv-has-avatar : Text {
                                     text: "◍"; font-size: 18px; color: Theme.dim;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
