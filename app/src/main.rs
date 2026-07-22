@@ -52,6 +52,9 @@ enum Cmd {
     ImportVoice,
     CvPickAvatar,
     CvStageAvatar { path: String, mode: String, sx: i32, sy: i32, sw: i32, sh: i32 },
+    TrToggleRecord { system: bool },
+    TrPickFile,
+    TrRefine { text: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -335,6 +338,30 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_cv_pick_avatar(move || { let _ = tx.send(Cmd::CvPickAvatar); });
+    }
+    // Transcription view.
+    {
+        let tx = tx.clone();
+        ui.on_tr_toggle_record(move |mode| {
+            let _ = tx.send(Cmd::TrToggleRecord { system: mode.as_str() == "system" });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_tr_pick_file(move || { let _ = tx.send(Cmd::TrPickFile); });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_tr_refine(move || {
+            let ui = ui_weak.unwrap();
+            let text = ui.get_tr_text().to_string();
+            if !text.trim().is_empty() {
+                ui.set_tr_busy(true);
+                ui.set_tr_status("refining…".into());
+                let _ = tx.send(Cmd::TrRefine { text });
+            }
+        });
     }
     // Crop accepted: turn the dialog's zoom/pan into a square source-pixel rect.
     {
@@ -984,6 +1011,8 @@ async fn worker(
 
     let mut levels = proxy.receive_audio_level().await?;
     let mut gprog = proxy.receive_generation_progress().await?;
+    let mut tprog = proxy.receive_transcribe_progress().await?;
+    let mut tres = proxy.receive_transcribe_result().await?;
     let mut ended = proxy.receive_speak_ended().await?;
     let mut pinfo = proxy.receive_playback_info().await?;
     let mut pprog = proxy.receive_playback_progress().await?;
@@ -1019,6 +1048,15 @@ async fn worker(
     let mut cv_edit: Option<String> = None;
     let mut cv_edit_transcript = String::new();
     let mut cv_avatar: Option<(String, String, i32, i32, i32, i32)> = None; // staged (path, mode, sx, sy, sw, sh)
+    // transcription view state
+    let mut tr_rec: Option<tokio::process::Child> = None;
+    let mut tr_elapsed: u32 = 0;
+    let tr_wav = std::env::var("XDG_RUNTIME_DIR")
+        .map(|d| format!("{d}/syrinx-transcribe.wav"))
+        .unwrap_or_else(|_| "/tmp/syrinx-transcribe.wav".into());
+    const TR_REC_MAX: u32 = 600; // 10 min safety cap
+    let mut pending_tr: u32 = 0;
+    let mut pending_tr_refine: u32 = 0;
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -1040,6 +1078,31 @@ async fn worker(
                     if let Some(msg) = a.state.strip_prefix("error:") {
                         let msg = msg.trim().to_string();
                         ui.upgrade_in_event_loop(move |ui| ui.set_gen_error(msg.into())).ok();
+                    }
+                }
+            }
+            Some(sig) = tprog.next() => {
+                if let Ok(a) = sig.args() {
+                    if a.req_id == pending_tr && pending_tr != 0 {
+                        let partial = a.partial.to_string();
+                        ui.upgrade_in_event_loop(move |ui| ui.set_tr_text(partial.into())).ok();
+                    }
+                }
+            }
+            Some(sig) = tres.next() => {
+                if let Ok(a) = sig.args() {
+                    if a.req_id == pending_tr && pending_tr != 0 {
+                        pending_tr = 0;
+                        let text = a.text.to_string();
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_tr_busy(false);
+                            if text.trim().is_empty() {
+                                ui.set_tr_status("no speech detected".into());
+                            } else {
+                                ui.set_tr_status("".into());
+                                ui.set_tr_text(text.into());
+                            }
+                        }).ok();
                     }
                 }
             }
@@ -1083,7 +1146,18 @@ async fn worker(
             }
             Some(sig) = llm_res.next() => {
                 if let Ok(a) = sig.args() {
-                    if a.req_id == pending_llm && pending_llm != 0 {
+                    // transcription-view refine result routes to tr-text
+                    if a.req_id == pending_tr_refine && pending_tr_refine != 0 {
+                        pending_tr_refine = 0;
+                        let text = a.text.to_string();
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_tr_busy(false);
+                            ui.set_tr_status("".into());
+                            if !text.trim().is_empty() {
+                                ui.set_tr_text(text.into());
+                            }
+                        }).ok();
+                    } else if a.req_id == pending_llm && pending_llm != 0 {
                         pending_llm = 0;
                         let text = a.text;
                         let ui_text = text.clone();
@@ -1151,7 +1225,31 @@ async fn worker(
                     }
                 }
             }
-            _ = rec_interval.tick(), if cv_rec.is_some() => {
+            _ = rec_interval.tick(), if cv_rec.is_some() || tr_rec.is_some() => {
+                if tr_rec.is_some() {
+                    tr_elapsed += 1;
+                    if tr_elapsed >= TR_REC_MAX {
+                        // safety cap — stop and transcribe what we have
+                        if let Some(mut child) = tr_rec.take() {
+                            stop_pw_record(&mut child).await;
+                            match proxy.transcribe_file(&tr_wav).await {
+                                Ok(id) => pending_tr = id,
+                                Err(e) => tracing::error!("transcribe failed: {e}"),
+                            }
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_recording(false);
+                                ui.set_tr_busy(true);
+                                ui.set_tr_status("transcribing…".into());
+                            }).ok();
+                        }
+                    } else {
+                        let e = tr_elapsed;
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_tr_status(format!("● recording {}:{:02}", e / 60, e % 60).into());
+                        }).ok();
+                    }
+                }
+                if cv_rec.is_none() { continue; }
                 rec_elapsed += 1;
                 if rec_elapsed >= REC_MAX {
                     // hit the cap — auto-stop and keep the clip
@@ -1719,6 +1817,89 @@ async fn worker(
                             }).ok();
                         }
                         Err(e) => tracing::error!("delete voice failed: {e}"),
+                    }
+                }
+                Some(Cmd::TrToggleRecord { system }) => {
+                    if let Some(mut child) = tr_rec.take() {
+                        // stop → transcribe (unless the capture came out silent)
+                        stop_pw_record(&mut child).await;
+                        if wav_rms(&tr_wav).map(|r| r < 0.006).unwrap_or(true) {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_recording(false);
+                                ui.set_tr_status("⚠ capture was silent — check the input device".into());
+                            }).ok();
+                        } else {
+                            match proxy.transcribe_file(&tr_wav).await {
+                                Ok(id) => {
+                                    pending_tr = id;
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_tr_recording(false);
+                                        ui.set_tr_busy(true);
+                                        ui.set_tr_status("transcribing…".into());
+                                    }).ok();
+                                }
+                                Err(e) => {
+                                    tracing::error!("transcribe failed: {e}");
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_tr_recording(false);
+                                        ui.set_tr_status("engine unavailable".into());
+                                    }).ok();
+                                }
+                            }
+                        }
+                    } else {
+                        let device = if system { default_monitor().await } else { None };
+                        if system && device.is_none() {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_status("no default sink monitor found".into());
+                            }).ok();
+                        } else {
+                            match start_pw_record(&tr_wav, device.as_deref()).await {
+                                Ok(child) => {
+                                    tr_rec = Some(child);
+                                    tr_elapsed = 0;
+                                    let mode = if system { "system" } else { "mic" };
+                                    ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_tr_text("".into());
+                                        ui.set_tr_rec_mode(mode.into());
+                                        ui.set_tr_recording(true);
+                                        ui.set_tr_status("● recording 0:00".into());
+                                    }).ok();
+                                }
+                                Err(e) => tracing::error!("record failed: {e}"),
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::TrPickFile) => {
+                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                        .add_filter("Audio", &["wav", "mp3", "flac", "ogg", "m4a", "opus", "webm"])
+                        .pick_file()
+                        .await
+                    {
+                        let path = handle.path().to_string_lossy().to_string();
+                        match proxy.transcribe_file(&path).await {
+                            Ok(id) => {
+                                pending_tr = id;
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_tr_text("".into());
+                                    ui.set_tr_busy(true);
+                                    ui.set_tr_status("transcribing…".into());
+                                }).ok();
+                            }
+                            Err(e) => tracing::error!("transcribe failed: {e}"),
+                        }
+                    }
+                }
+                Some(Cmd::TrRefine { text }) => {
+                    match proxy.refine_transcript(&text).await {
+                        Ok(rid) if rid != 0 => pending_tr_refine = rid,
+                        _ => {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_busy(false);
+                                ui.set_tr_status("refine unavailable".into());
+                            }).ok();
+                        }
                     }
                 }
                 Some(Cmd::CvPickAvatar) => {

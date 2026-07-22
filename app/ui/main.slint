@@ -497,6 +497,12 @@ export component AppWindow inherits Window {
     // --- navbar tooltip overlay (drawn window-level, above the main panel) ---
     in-out property <string> nav-tip: "";
     in-out property <length> nav-tip-y: 0px;
+    // --- transcription view ---
+    in-out property <string> tr-text;
+    in property <bool> tr-recording;
+    in property <string> tr-rec-mode: "mic";   // which source is live
+    in property <bool> tr-busy;                // transcribing or refining
+    in property <string> tr-status;
     // --- delete-voice confirm ---
     in-out property <string> del-id: "";
     in-out property <string> del-name: "";
@@ -582,6 +588,9 @@ export component AppWindow inherits Window {
     callback pick-effect(int);
     callback cv-pick-avatar();
     callback crop-done(bool);   // accepted?
+    callback tr-toggle-record(string);  // "mic" | "system"
+    callback tr-pick-file();
+    callback tr-refine();
     callback apply-fx(string, int);  // history id, effect dropdown index
     callback toggle-loop(bool);
     callback set-volume(float);
@@ -654,9 +663,15 @@ export component AppWindow inherits Window {
                         padding: 16px; spacing: 14px;
                         VerticalLayout {
                             spacing: 2px;
-                            Text { text: tab == "tts" ? "Text to Speech" : (tab == "models" ? "Models" : "Coming soon"); font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg; }
+                            Text {
+                                text: tab == "tts" ? "Text to Speech"
+                                    : tab == "stt" ? "Transcription"
+                                    : (tab == "models" ? "Models" : "Coming soon");
+                                font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg;
+                            }
                             Text {
                                 text: tab == "tts" ? "Type it, pick a voice, hear it — all local."
+                                    : tab == "stt" ? "Record or import audio — whisper turns it into text."
                                     : (tab == "models" ? hardware-line : "This screen is stubbed for now.");
                                 font-size: 12px; color: Theme.name == "win95" ? #cfe6e6 : Theme.dim;
                             }
@@ -1125,8 +1140,126 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // ---- Transcription workspace ----
+                    if tab == "stt" : VerticalLayout {
+                        padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 12px;
+                        // sources
+                        HorizontalLayout {
+                            spacing: 8px;
+                            TBtn {
+                                label: tr-recording && tr-rec-mode == "mic" ? "■ Stop" : "● Record mic";
+                                generate: tr-recording && tr-rec-mode == "mic";
+                                clicked => { if (!tr-busy) { root.tr-toggle-record("mic"); } }
+                            }
+                            TBtn {
+                                label: tr-recording && tr-rec-mode == "system" ? "■ Stop" : "◉ Record system";
+                                generate: tr-recording && tr-rec-mode == "system";
+                                clicked => { if (!tr-busy) { root.tr-toggle-record("system"); } }
+                            }
+                            TBtn {
+                                label: "⇪ Import audio…";
+                                clicked => { if (!tr-busy && !tr-recording) { root.tr-pick-file(); } }
+                            }
+                            Rectangle {}
+                            Text {
+                                text: tr-status; font-size: 11px; font-family: Theme.mono;
+                                color: Theme.dim; vertical-alignment: center;
+                            }
+                        }
+                        // transcript — editable, scrollable, right-click menu
+                        Rectangle {
+                            vertical-stretch: 1;
+                            property <length> ctx-x;
+                            property <length> ctx-y;
+                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                            border-radius: Theme.rad;
+                            background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                            trta := TouchArea {
+                                pointer-event(e) => {
+                                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                        ctx-x = trta.mouse-x;
+                                        ctx-y = trta.mouse-y;
+                                        trmenu.show();
+                                    }
+                                }
+                            }
+                            if tr-text == "" && !tr-busy : Text {
+                                x: 12px; y: 10px; width: parent.width - 24px;
+                                text: "Record from the microphone, tap the system audio, or import a file — the transcript lands here, live as it decodes.";
+                                font-size: 13px; color: Theme.dim; opacity: 0.6;
+                                wrap: word-wrap; font-family: Theme.font;
+                            }
+                            trsv := ScrollView {
+                                x: 12px; y: 10px;
+                                width: parent.width - 24px; height: parent.height - 26px;
+                                viewport-width: self.visible-width;
+                                trti := TextInput {
+                                    x: 0; y: 0;
+                                    width: trsv.visible-width;
+                                    height: max(trsv.visible-height, self.preferred-height);
+                                    text <=> tr-text;
+                                    wrap: word-wrap; single-line: false;
+                                    font-size: 13.5px; color: Theme.fg; font-family: Theme.font;
+                                }
+                            }
+                            // working marquee while transcribing / refining
+                            if tr-busy : Rectangle {
+                                x: 12px; width: parent.width - 24px;
+                                y: parent.height - 10px; height: 4px;
+                                border-radius: 2px; background: Theme.chip-bg; clip: true;
+                                Rectangle {
+                                    height: 100%; width: parent.width * 0.35;
+                                    border-radius: 2px; background: Theme.gen-bg;
+                                    x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
+                                }
+                            }
+                            trmenu := PopupWindow {
+                                x: parent.ctx-x; y: parent.ctx-y;
+                                width: 150px; height: 120px;
+                                close-policy: close-on-click-outside;
+                                Rectangle {
+                                    background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                    border-width: Theme.name == "win95" ? 0px : 1px;
+                                    border-color: Theme.brd; border-radius: Theme.rad;
+                                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                    VerticalLayout {
+                                        padding: 3px;
+                                        RowMenuItem { label: "Cut"; chosen => { trti.cut(); trmenu.close(); } }
+                                        RowMenuItem { label: "Copy"; chosen => { trti.copy(); trmenu.close(); } }
+                                        RowMenuItem { label: "Paste"; chosen => { trti.paste(); trmenu.close(); } }
+                                        RowMenuItem { label: "Select all"; chosen => { trti.select-all(); trmenu.close(); } }
+                                    }
+                                }
+                            }
+                        }
+                        // actions
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Text {
+                                text: "Transcript is editable — fix names before using it.";
+                                font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {}
+                            TBtn {
+                                label: tr-busy ? "…" : "✎ Refine with LLM";
+                                clicked => { if (!tr-busy && tr-text != "") { root.tr-refine(); } }
+                            }
+                            TBtn {
+                                label: "✦ Use in composer"; generate: true; min-width: 150px;
+                                clicked => {
+                                    if (tr-text != "") {
+                                        root.text = tr-text;
+                                        tab = "tts";
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // ---- stub for other tabs ----
-                    if tab != "tts" && tab != "models" : Rectangle {
+                    if tab != "tts" && tab != "models" && tab != "stt" : Rectangle {
                         HorizontalLayout {
                             alignment: center;
                             VerticalLayout {
