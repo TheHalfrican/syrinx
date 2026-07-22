@@ -16,9 +16,14 @@ CachyOS + Hyprland. This document is the roadmap for bringing the same codebase
    of app or engine logic.
 2. **Linux remains the reference platform.** Ports follow Linux polish, not the
    other way around.
-3. **No webviews.** The Slint UI is the cross-platform story; that's why it was
+3. **Linux-native mechanisms are features, not debt.** D-Bus, parecord monitor
+   taps, the wlr-layer-shell dictation stack: these stay exactly as they are.
+   Each seam is a *strategy point* selected by OS detection — Linux keeps its
+   native implementation, Windows/macOS get their own behind the same
+   interface. Nothing Linux-native gets replaced to make porting convenient.
+4. **No webviews.** The Slint UI is the cross-platform story; that's why it was
    chosen. No Tauri, no Electron.
-4. **The engine contract stays thin.** All portability work happens at the
+5. **The engine contract stays thin.** All portability work happens at the
    service/transport layer; ML modules (`tts.py`, `stt.py`, `llm.py`,
    `effects.py`, backends) must not grow platform conditionals beyond device
    selection.
@@ -33,76 +38,80 @@ CachyOS + Hyprland. This document is the roadmap for bringing the same codebase
 | Theme system | 5 skins | ✅ | '95 skin: Tahoma → fallback chain on mac |
 | File dialogs (rfd) | ✅ | ✅ native everywhere | none |
 | Avatar pipeline (image crate) | ✅ | ✅ | none |
-| **IPC: D-Bus (zbus / dbus_next)** | Linux session bus | ❌ **the one architectural blocker** | Replace with JSON-RPC over localhost (see below) |
+| **IPC: D-Bus (zbus / dbus_next)** | Linux session bus | Linux-native | **Keep on Linux.** Add a second transport (JSON-RPC over localhost) selected on Win/mac (see below) |
 | Engine ML core (torch/transformers/faster-whisper/kokoro/pedalboard) | CPU/CUDA | ✅ pip-installable on all three | Device matrix (below) |
 | Isolated-venv workers (LuxTTS pattern) | subprocess, JSON-over-stdio | ✅ pattern is portable | Verify k2 wheels per-OS |
 | Audio playback (sounddevice/PortAudio) | ✅ | ✅ | none |
-| Mic recording | app shells out to `parecord` | ❌ PulseAudio-only | Move recording INTO the engine via sounddevice (fixes Linux dependency too) |
-| System-audio capture | `parecord --device=<sink>.monitor` | ❌ per-OS | Win: WASAPI loopback · mac: needs loopback driver (BlackHole) · phase 3 |
-| Dictation (dictate/) | pw-record + wtype + wlr-layer-shell + compositor keybind | ❌ Wayland-native by design | Per-OS reimplementation, phase 3; ship v1 ports without it |
-| Paths | XDG (`~/.local/share/syrinx`, XDG_RUNTIME_DIR) | ❌ hardcoded | `platformdirs` (py) + `dirs` (rs) |
-| Process lifecycle | `setsid nohup` by hand | ❌ (and clunky on Linux) | App spawns/supervises the engine as a child process |
-| Packaging | cargo build + venv by hand | ❌ | Per-OS installers, phase 2 |
+| Mic recording | app shells out to `parecord` | Linux-native | **Keep on Linux** (monitor taps are a feature). Win/mac: engine-side sounddevice recording behind the same capture interface |
+| System-audio capture | `parecord --device=<sink>.monitor` | Linux-native | Win: WASAPI loopback · mac: loopback driver (BlackHole) · phase 3 |
+| Dictation (dictate/) | pw-record + wtype + wlr-layer-shell + compositor keybind | Wayland-native **by design** | **Untouched, permanently.** Win/mac get separate implementations in phase 3; v1 ports ship without dictation |
+| Paths | XDG (`~/.local/share/syrinx`, XDG_RUNTIME_DIR) | XDG | `platformdirs` (py) + `dirs` (rs) — these ARE OS detection and return the exact current XDG paths on Linux; zero Linux change |
+| Process lifecycle | `setsid nohup` by hand | dev workflow | Linux: keep (optionally graduate to a systemd user unit / D-Bus activation — native polish). Win/mac: app spawns/supervises the engine |
+| Packaging | cargo build + venv by hand | source-first | Per-OS installers, phase 2; Linux stays source-first |
 
 Roughly 90% of the code needs zero changes.
 
 ---
 
-## Phase 1 — De-Linuxing the seams (all changes also benefit Linux)
+## Phase 1 — Strategy seams (Linux paths stay untouched)
 
-### 1.1 Transport: D-Bus → JSON-RPC over localhost
+The rule for every seam: extract the *interface* the app/engine already
+implies, keep the existing Linux implementation behind it verbatim, add a
+Win/mac implementation next to it, select by OS detection (compile-time
+`#[cfg]` in Rust, `sys.platform` in Python).
 
-The only structural change. Design:
+### 1.1 Transport: D-Bus on Linux, JSON-RPC over localhost elsewhere
 
-- **Protocol:** JSON-RPC 2.0 over a WebSocket on `127.0.0.1:<port>` (or a Unix
-  socket / named pipe; WebSocket chosen because it gives framing + push in one
-  well-supported package on all three platforms).
-- **Methods** map 1:1 from the current `sh.syrinx.Engine1` surface — the
-  contract already lives in exactly two thin places:
-  - Rust: the `Engine` trait in `shared/src/lib.rs` (zbus proxy macro) →
-    becomes a hand-rolled (or macro-generated) RPC client over
-    `tokio-tungstenite`.
-  - Python: `service.py` (dbus_next `ServiceInterface`) → same methods exposed
-    through `websockets`/`aiohttp`. ML modules untouched.
-- **Signals** (GenerationProgress, AudioLevel, PlaybackInfo/Progress,
-  LlmResult, ModelProgress, SpeakStarted/Ended) → server-push notifications on
-  the same socket. The app's `tokio::select!` loop keeps its shape; only the
-  stream sources change.
-- **Auth/scope:** bind to loopback only; write the ephemeral port + a session
-  token to the runtime dir so only local user processes connect.
-- **Debugging:** losing `busctl` costs real ergonomics — add a tiny
-  `syrinx-cli` (call any method, watch the event stream) as part of this work.
-- **Migration strategy:** implement the RPC server alongside D-Bus first
-  (both active), port the app, then delete the D-Bus layer once stable. The
-  dictate binary migrates in the same sweep (it only uses Transcribe +
-  RefineTranscript + LlmResult).
+- **Linux: unchanged.** zbus + dbus_next, same bus name, `busctl` debugging,
+  the dictate binary keeps talking D-Bus. This also keeps the door open for
+  D-Bus activation / a systemd user unit as future Linux-native polish.
+- **Win/mac:** JSON-RPC 2.0 over a WebSocket on `127.0.0.1:<ephemeral port>`
+  (framing + server-push in one well-supported package). Loopback-only plus a
+  session token written to the app data dir.
+- **The shared abstraction (the real work, needed for any approach):**
+  - Rust: an `EngineClient` trait mirroring the surface in
+    `shared/src/lib.rs`, with a unified event-stream enum for the signals
+    (GenerationProgress, AudioLevel, PlaybackInfo/Progress, LlmResult,
+    ModelProgress, SpeakStarted/Ended). Impl A wraps the existing zbus proxy;
+    impl B is the RPC client (`tokio-tungstenite`). The app's
+    `tokio::select!` loop consumes the unified stream and stops caring which
+    transport feeds it.
+  - Python: extract `service.py`'s handlers into a transport-agnostic core;
+    the dbus_next `ServiceInterface` and the RPC server become two thin
+    mechanical wrappers over it. ML modules untouched.
+- **Drift protection (the cost of two transports):** a contract test suite
+  that runs the same method/signal exercises over BOTH wrappers in CI, so the
+  Windows transport can never silently fall behind the Linux one.
 
-### 1.2 Engine lifecycle
+### 1.2 Engine lifecycle, per-OS
 
-The app spawns `syrinx-engine` as a child process on launch (configurable to
-attach to an already-running one for dev), restarts it on crash, and shuts it
-down on exit. Kills the "restart each morning" ritual on Linux and is required
-on Win/mac anyway. The ephemeral-port handshake from 1.1 doubles as the
-readiness signal.
+- **Linux: unchanged** (manual/dev workflow today; optional future polish is a
+  systemd user service or D-Bus activation — both *more* Linux-native, not
+  less).
+- **Win/mac:** the app spawns `syrinx-engine` as a supervised child process
+  (restart on crash, shutdown on exit); the RPC handshake doubles as the
+  readiness signal.
 
-### 1.3 Recording moves into the engine
+### 1.3 Recording, per-OS
 
-Replace the app-side `parecord` shell-out with engine methods
-(`StartRecording(device)/StopRecording -> wav path`) implemented with
-sounddevice input streams (PortAudio: WASAPI/CoreAudio/Pulse-Pipewire).
-The create-voice modal keeps its exact UX. System-audio capture stays
-Linux-only until phase 3 (hide the "System" tab where unsupported).
+- **Linux: unchanged.** `parecord` stays — the monitor-tap system-audio
+  capture is a Linux feature worth protecting.
+- **Win/mac:** engine methods (`StartRecording/StopRecording → wav`) using
+  sounddevice input streams (WASAPI/CoreAudio via PortAudio), selected behind
+  the same app-side capture interface. The create-voice modal UX is identical;
+  the "System" capture tab hides where unsupported (until phase 3).
 
 ### 1.4 Paths
 
-- Python: `platformdirs` — data dir (profiles/history/models.json), cache dir.
-- Rust: `dirs` — runtime/scratch files (recording temp, dictate state).
-- One data-dir override env (`SYRINX_DATA_DIR`, already exists) works everywhere.
+`platformdirs` (Python) + `dirs` (Rust) — these libraries ARE the OS switch:
+on Linux they resolve to the exact XDG paths used today, so this seam changes
+nothing on Linux by construction. `SYRINX_DATA_DIR` override keeps working
+everywhere.
 
 **Phase 1 exit criteria:** full generation studio (voices, cloning, effects,
-history, avatars, compose/rewrite/refine, Models tab) runs on Windows and macOS
-from a source checkout; Linux runs on the same transport with the app managing
-the engine.
+history, avatars, compose/rewrite/refine, Models tab) runs on Windows and
+macOS from a source checkout; the Linux build behaves byte-for-byte as before,
+still on D-Bus; the transport contract tests pass on both wrappers.
 
 ---
 
@@ -172,6 +181,9 @@ Notes:
 
 - No Tauri/Electron, no webview UI.
 - No per-platform forks of app or engine logic.
+- No removal or replacement of Linux-native mechanisms (D-Bus, parecord,
+  the Wayland dictation stack) in the name of portability — seams select,
+  they don't substitute.
 - No cloud anything — Syrinx stays fully local on every OS.
 
 ---
