@@ -51,7 +51,7 @@ enum Cmd {
     DeleteVoice { id: String },
     ImportVoice,
     CvPickAvatar,
-    CvStageAvatar { path: String, sx: i32, sy: i32, side: i32 },
+    CvStageAvatar { path: String, mode: String, sx: i32, sy: i32, sw: i32, sh: i32 },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -351,10 +351,14 @@ fn main() -> anyhow::Result<()> {
             if path.is_empty() || w < 1.0 || h < 1.0 {
                 return;
             }
-            let side = (w.min(h) / ui.get_crop_zoom().max(1.0)).round();
-            let sx = (ui.get_crop_cx() * w - side / 2.0).clamp(0.0, (w - side).max(0.0)).round() as i32;
-            let sy = (ui.get_crop_cy() * h - side / 2.0).clamp(0.0, (h - side).max(0.0)).round() as i32;
-            let _ = tx.send(Cmd::CvStageAvatar { path, sx, sy, side: side as i32 });
+            // mirror the dialog viewport's aspect: circle 220x220, panel 132x220
+            let mode = ui.get_crop_mode().to_string();
+            let (vw, vh): (f32, f32) = if mode == "panel" { (132.0, 220.0) } else { (220.0, 220.0) };
+            let cw = (w.min(h * vw / vh) / ui.get_crop_zoom().max(1.0)).round();
+            let ch = (cw * vh / vw).round();
+            let sx = (ui.get_crop_cx() * w - cw / 2.0).clamp(0.0, (w - cw).max(0.0)).round() as i32;
+            let sy = (ui.get_crop_cy() * h - ch / 2.0).clamp(0.0, (h - ch).max(0.0)).round() as i32;
+            let _ = tx.send(Cmd::CvStageAvatar { path, mode, sx, sy, sw: cw as i32, sh: ch as i32 });
         });
     }
     {
@@ -410,9 +414,11 @@ struct VoiceData {
     kind: String,
     has_personality: bool,
     avatar_path: String,
+    avatar_mode: String,
     avatar_sx: i32,
     avatar_sy: i32,
     avatar_side: i32,
+    avatar_sh: i32,
 }
 
 /// UI-thread conversion: load each avatar photo and build the model rows.
@@ -435,9 +441,11 @@ fn to_voice_items(data: Vec<VoiceData>) -> Vec<VoiceItem> {
                 kind: d.kind.into(),
                 has_personality: d.has_personality,
                 avatar,
+                avatar_mode: if d.avatar_mode.is_empty() { "circle".into() } else { d.avatar_mode.into() },
                 avatar_sx: d.avatar_sx,
                 avatar_sy: d.avatar_sy,
                 avatar_side: side,
+                avatar_sh: if d.avatar_sh > 0 { d.avatar_sh } else { side },
             }
         })
         .collect()
@@ -475,7 +483,7 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
                 .and_then(|p| p.get("has_personality"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let (desc, lang, kind, avatar_path, asx, asy, aside) = if let Some(p) = pmap.get(&id) {
+            let (desc, lang, kind, avatar_path, avatar_mode, asx, asy, aside, ash) = if let Some(p) = pmap.get(&id) {
                 let vt = p.get("voice_type").and_then(|v| v.as_str()).unwrap_or("voice");
                 let l = p.get("language").and_then(|v| v.as_str()).unwrap_or("en");
                 // the profile's own description, falling back to a kind label
@@ -490,12 +498,15 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
                     l.to_string(),
                     vt.to_string(),
                     p.get("avatar_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    p.get("avatar_mode").and_then(|v| v.as_str()).unwrap_or("circle").to_string(),
                     i("avatar_sx"),
                     i("avatar_sy"),
                     i("avatar_side"),
+                    i("avatar_sh"),
                 )
             } else {
-                (String::new(), "en".to_string(), "voice".to_string(), String::new(), 0, 0, 0)
+                (String::new(), "en".to_string(), "voice".to_string(),
+                 String::new(), "circle".to_string(), 0, 0, 0, 0)
             };
             users.push(VoiceData {
                 id,
@@ -505,9 +516,11 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
                 kind,
                 has_personality: hp,
                 avatar_path,
+                avatar_mode,
                 avatar_sx: asx,
                 avatar_sy: asy,
                 avatar_side: aside,
+                avatar_sh: ash,
             });
         }
     }
@@ -927,7 +940,7 @@ async fn worker(
     let mut speak_after_llm: Option<String> = None;
     let mut cv_edit: Option<String> = None;
     let mut cv_edit_transcript = String::new();
-    let mut cv_avatar: Option<(String, i32, i32, i32)> = None; // staged (path, sx, sy, side)
+    let mut cv_avatar: Option<(String, String, i32, i32, i32, i32)> = None; // staged (path, mode, sx, sy, sw, sh)
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -1232,8 +1245,8 @@ async fn worker(
                         }).to_string();
                         match proxy.update_profile(&pid, &patch).await {
                             Ok(_) => {
-                                if let Some((path, asx, asy, aside)) = cv_avatar.take() {
-                                    proxy.set_profile_avatar(&pid, &path, asx, asy, aside).await.ok();
+                                if let Some((path, amode, asx, asy, asw, ash)) = cv_avatar.take() {
+                                    proxy.set_profile_avatar(&pid, &path, &amode, asx, asy, asw, ash).await.ok();
                                 }
                                 if let Some(sample) = cv_sample.take() {
                                     // a new capture replaces the existing samples
@@ -1306,8 +1319,8 @@ async fn worker(
                         }.await;
                         match outcome {
                             Ok(pid) => {
-                                if let Some((path, asx, asy, aside)) = cv_avatar.take() {
-                                    proxy.set_profile_avatar(&pid, &path, asx, asy, aside).await.ok();
+                                if let Some((path, amode, asx, asy, asw, ash)) = cv_avatar.take() {
+                                    proxy.set_profile_avatar(&pid, &path, &amode, asx, asy, asw, ash).await.ok();
                                 }
                                 let raw = proxy.list_voices().await.unwrap_or_default();
                                 let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
@@ -1573,9 +1586,17 @@ async fn worker(
                         };
                         // existing avatar for the modal preview
                         let av_path = s("avatar_path");
+                        let av_mode = {
+                            let m = s("avatar_mode");
+                            if m.is_empty() { "circle".to_string() } else { m }
+                        };
                         let iv = |k: &str| p.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                         let (av_sx, av_sy, av_side) =
                             (iv("avatar_sx"), iv("avatar_sy"), iv("avatar_side"));
+                        let av_sh = {
+                            let sh = iv("avatar_sh");
+                            if sh > 0 { sh } else { av_side }
+                        };
                         cv_edit = Some(id.clone());
                         cv_sample = None;
                         cv_avatar = None;
@@ -1592,9 +1613,11 @@ async fn worker(
                                 match slint::Image::load_from_path(std::path::Path::new(&av_path)) {
                                     Ok(img) => {
                                         ui.set_cv_avatar(img);
+                                        ui.set_cv_avatar_mode(av_mode.into());
                                         ui.set_cv_avatar_sx(av_sx);
                                         ui.set_cv_avatar_sy(av_sy);
                                         ui.set_cv_avatar_side(av_side);
+                                        ui.set_cv_avatar_sh(av_sh);
                                     }
                                     Err(_) => ui.set_cv_avatar_side(0),
                                 }
@@ -1640,6 +1663,7 @@ async fn worker(
                                     ui.set_crop_zoom(1.0);
                                     ui.set_crop_cx(0.5);
                                     ui.set_crop_cy(0.5);
+                                    ui.set_crop_stage("mode".into());
                                     ui.set_crop_open(true);
                                 }
                                 Err(e) => tracing::error!("could not load image: {e}"),
@@ -1647,14 +1671,16 @@ async fn worker(
                         }).ok();
                     }
                 }
-                Some(Cmd::CvStageAvatar { path, sx, sy, side }) => {
-                    cv_avatar = Some((path.clone(), sx, sy, side));
+                Some(Cmd::CvStageAvatar { path, mode, sx, sy, sw, sh }) => {
+                    cv_avatar = Some((path.clone(), mode.clone(), sx, sy, sw, sh));
                     ui.upgrade_in_event_loop(move |ui| {
                         if let Ok(img) = slint::Image::load_from_path(std::path::Path::new(&path)) {
                             ui.set_cv_avatar(img);
+                            ui.set_cv_avatar_mode(mode.into());
                             ui.set_cv_avatar_sx(sx);
                             ui.set_cv_avatar_sy(sy);
-                            ui.set_cv_avatar_side(side);
+                            ui.set_cv_avatar_side(sw);
+                            ui.set_cv_avatar_sh(sh);
                         }
                     }).ok();
                 }

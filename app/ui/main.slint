@@ -4,8 +4,10 @@ import { ScrollView } from "std-widgets.slint";
 
 export struct VoiceItem {
     id: string, name: string, desc: string, lang: string, kind: string, has-personality: bool,
-    // avatar photo + its square crop rect in source pixels (side 0 = none)
-    avatar: image, avatar-sx: int, avatar-sy: int, avatar-side: int,
+    // avatar photo + crop rect in source pixels (avatar-side = crop width;
+    // 0 = none). mode "circle" = big circle top-right (square crop);
+    // "panel" = the card's right third (tall crop, height avatar-sh).
+    avatar: image, avatar-mode: string, avatar-sx: int, avatar-sy: int, avatar-side: int, avatar-sh: int,
 }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
 export struct ModelItem {
@@ -159,49 +161,82 @@ component VoiceCard inherits Rectangle {
     border-color: active ? Theme.acc : (ta.has-hover ? Theme.acc : Theme.brd);
     background: Theme.card-bg;
     // no clip: rounded clip forces a blurry offscreen layer (content is padded anyway)
+    property <bool> panel: v.avatar-mode == "panel" && v.avatar-side > 0;
+    property <bool> circ: v.avatar-mode != "panel" && v.avatar-side > 0;
+    property <int> crop-h: v.avatar-sh > 0 ? v.avatar-sh : v.avatar-side;  // pre-mode avatars
     ta := TouchArea { clicked => { root.clicked(); } }
     if win95 : Bevel { width: 100%; height: 100%; sunken: active; }
-    VerticalLayout {
-        padding: 13px; spacing: 4px;
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: v.name; font-size: 14px; font-weight: 700; color: Theme.fg; overflow: elide; vertical-alignment: center; }
-            if active : Rectangle {
-                background: Theme.acc; border-radius: 9px; height: 18px;
-                y: 8px;
-                HorizontalLayout {
-                    padding-left: 7px; padding-right: 7px;
-                    Text { text: "ACTIVE"; font-size: 9px; font-weight: 700; color: Theme.acc-fg; vertical-alignment: center; }
+    HorizontalLayout {
+        // LEFT: card content (full width unless a panel avatar claims a third)
+        VerticalLayout {
+            horizontal-stretch: 1;
+            padding: 13px; spacing: 4px;
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    horizontal-stretch: 1; spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: v.name; font-size: 14px; font-weight: 700; color: Theme.fg; overflow: elide; vertical-alignment: center; }
+                        if active : Rectangle {
+                            background: Theme.acc; border-radius: 9px; height: 18px;
+                            y: 1px;
+                            HorizontalLayout {
+                                padding-left: 7px; padding-right: 7px;
+                                Text { text: "ACTIVE"; font-size: 9px; font-weight: 700; color: Theme.acc-fg; vertical-alignment: center; }
+                            }
+                        }
+                        Rectangle {}
+                    }
+                    Text { text: v.desc; font-size: 11.5px; color: Theme.dim; wrap: word-wrap; }
+                }
+                // big circular avatar, top-right of the content area
+                if circ : VerticalLayout {
+                    alignment: start;
+                    Rectangle {
+                        width: 62px; height: 62px; border-radius: 31px;
+                        border-width: 1px; border-color: Theme.brd;
+                        clip: true;
+                        Image {
+                            width: 100%; height: 100%;
+                            source: v.avatar;
+                            image-fit: fill;
+                            source-clip-x: v.avatar-sx;
+                            source-clip-y: v.avatar-sy;
+                            source-clip-width: v.avatar-side;
+                            source-clip-height: v.avatar-side;
+                        }
+                    }
                 }
             }
-            Rectangle {}
-            // circular avatar (the same source-clip crop the editor chose)
-            if v.avatar-side > 0 : Rectangle {
-                width: 34px; height: 34px; border-radius: 17px;
-                border-width: 1px; border-color: Theme.brd;
-                clip: true;
-                Image {
-                    width: 100%; height: 100%;
-                    source: v.avatar;
-                    image-fit: fill;
-                    source-clip-x: v.avatar-sx;
-                    source-clip-y: v.avatar-sy;
-                    source-clip-width: v.avatar-side;
-                    source-clip-height: v.avatar-side;
-                }
+            Rectangle {}  // flex spacer — push chips to the bottom
+            HorizontalLayout {
+                spacing: 6px;
+                Chip { label: v.lang; }
+                Chip { label: v.kind; }
+                Rectangle {}
+                // Voicebox-style card actions: export / edit / delete
+                IconBtn { size: 24px; glyph-size: 11px; glyph: "⇩"; tip: "Export voice"; clicked => { root.export-clicked(); } }
+                IconBtn { size: 24px; glyph-size: 11px; glyph: "✎"; tip: "Edit voice"; clicked => { root.edit-clicked(); } }
+                IconBtn { size: 24px; glyph-size: 11px; glyph: "✕"; tip: "Delete voice"; clicked => { root.delete-clicked(); } }
             }
         }
-        Text { text: v.desc; font-size: 11.5px; color: Theme.dim; wrap: word-wrap; }
-        Rectangle {}  // flex spacer — push chips to the bottom
-        HorizontalLayout {
-            spacing: 6px;
-            Chip { label: v.lang; }
-            Chip { label: v.kind; }
-            Rectangle {}
-            // Voicebox-style card actions: export / edit / delete
-            IconBtn { size: 24px; glyph-size: 11px; glyph: "⇩"; tip: "Export voice"; clicked => { root.export-clicked(); } }
-            IconBtn { size: 24px; glyph-size: 11px; glyph: "✎"; tip: "Edit voice"; clicked => { root.edit-clicked(); } }
-            IconBtn { size: 24px; glyph-size: 11px; glyph: "✕"; tip: "Delete voice"; clicked => { root.delete-clicked(); } }
+        // RIGHT: panel avatar — the card's right third behind a divider
+        if panel : Rectangle { width: 1px; background: Theme.brd; }
+        if panel : Rectangle {
+            width: root.width / 3;
+            clip: true;
+            border-top-right-radius: Theme.rad;
+            border-bottom-right-radius: Theme.rad;
+            Image {
+                width: 100%; height: 100%;
+                source: v.avatar;
+                image-fit: cover;
+                source-clip-x: v.avatar-sx;
+                source-clip-y: v.avatar-sy;
+                source-clip-width: v.avatar-side;
+                source-clip-height: root.crop-h;
+            }
         }
     }
 }
@@ -515,11 +550,15 @@ export component AppWindow inherits Window {
     in-out property <int> cv-model-index: 0;
     // avatar preview in the modal (staged or existing)
     in-out property <image> cv-avatar;
+    in-out property <string> cv-avatar-mode: "circle";
     in-out property <int> cv-avatar-sx: 0;
     in-out property <int> cv-avatar-sy: 0;
     in-out property <int> cv-avatar-side: 0;
-    // --- avatar crop dialog (zoom + pan into the circle) ---
+    in-out property <int> cv-avatar-sh: 0;
+    // --- avatar crop dialog (shape choice, then zoom + pan) ---
     in-out property <bool> crop-open: false;
+    in-out property <string> crop-stage: "mode";  // mode | crop
+    in-out property <string> crop-mode: "circle"; // circle | panel
     in-out property <image> crop-src;
     in-out property <string> crop-path: "";
     in-out property <float> crop-zoom: 1.0;   // 1..4
@@ -1318,22 +1357,24 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         horizontal-stretch: 1; spacing: 12px;
                         Text { text: "VOICE DETAILS"; font-size: 11px; font-weight: 700; color: Theme.dim; }
-                        // avatar: circular preview + picker
+                        // avatar: shape-matched preview + picker
                         HorizontalLayout {
                             spacing: 10px;
                             Rectangle {
-                                width: 44px; height: 44px; border-radius: 22px;
+                                width: cv-avatar-mode == "panel" && cv-avatar-side > 0 ? 30px : 44px;
+                                height: 44px;
+                                border-radius: cv-avatar-mode == "panel" && cv-avatar-side > 0 ? 5px : 22px;
                                 border-width: 1px; border-color: Theme.brd;
                                 background: Theme.chip-bg;
                                 clip: true;
                                 if cv-avatar-side > 0 : Image {
                                     width: 100%; height: 100%;
                                     source: cv-avatar;
-                                    image-fit: fill;
+                                    image-fit: cover;
                                     source-clip-x: cv-avatar-sx;
                                     source-clip-y: cv-avatar-sy;
                                     source-clip-width: cv-avatar-side;
-                                    source-clip-height: cv-avatar-side;
+                                    source-clip-height: cv-avatar-sh > 0 ? cv-avatar-sh : cv-avatar-side;
                                 }
                                 if cv-avatar-side == 0 : Text {
                                     text: "◍"; font-size: 18px; color: Theme.dim;
@@ -1465,36 +1506,76 @@ export component AppWindow inherits Window {
         }
     }
 
-    // --- avatar crop dialog: drag to pan, slider to zoom ---
+    // --- avatar dialog: pick the shape, then drag to pan / slider to zoom ---
     if crop-open : Rectangle {
         background: #0a0f14d9;
         TouchArea {}  // swallow clicks to the app behind
         Rectangle {
-            width: 320px; height: 404px;
+            width: 340px; height: crop-stage == "mode" ? 300px : 404px;
             x: round((parent.width - self.width) / 2 / 1px) * 1px;
             y: round((parent.height - self.height) / 2 / 1px) * 1px;
             background: Theme.modal-bg;
             border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
             border-radius: 0px;
             if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
-            VerticalLayout {
+            // STAGE 1: how should the photo appear on the card?
+            if crop-stage == "mode" : VerticalLayout {
+                padding: 18px; spacing: 12px;
+                Text { text: "Avatar style"; font-size: 15px; font-weight: 700; color: Theme.fg; }
+                Text { text: "How should the photo appear on the card?"; font-size: 11px; color: Theme.dim; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    for opt in [
+                        { k: "circle", glyph: "●", label: "Big circle", hint: "Round portrait, top-right" },
+                        { k: "panel", glyph: "▮", label: "Side panel", hint: "Fills the card's right third" },
+                    ] : Rectangle {
+                        horizontal-stretch: 1; height: 130px;
+                        border-radius: Theme.rad;
+                        border-width: Theme.name == "win95" ? 0px : 1px;
+                        border-color: mta.has-hover ? Theme.acc : Theme.btn-brd;
+                        background: mta.has-hover ? Theme.acc-soft : Theme.btn-bg;
+                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: mta.pressed; }
+                        mta := TouchArea {
+                            clicked => { crop-mode = opt.k; crop-stage = "crop"; }
+                        }
+                        VerticalLayout {
+                            alignment: center; spacing: 8px;
+                            Text { text: opt.glyph; font-size: 30px; color: Theme.acc; horizontal-alignment: center; }
+                            Text { text: opt.label; font-size: 12.5px; font-weight: 700; color: Theme.fg; horizontal-alignment: center; }
+                            Text { text: opt.hint; font-size: 10px; color: Theme.dim; horizontal-alignment: center; wrap: word-wrap; }
+                        }
+                    }
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    alignment: end;
+                    TBtn { label: "Cancel"; clicked => { crop-open = false; root.crop-done(false); } }
+                }
+            }
+            // STAGE 2: shape-matched crop viewport
+            if crop-stage == "crop" : VerticalLayout {
                 padding: 18px; spacing: 12px;
                 Text { text: "Crop photo"; font-size: 15px; font-weight: 700; color: Theme.fg; }
                 Text { text: "Drag to position · slider to zoom"; font-size: 11px; color: Theme.dim; }
-                // circular viewport — shows exactly what the card circle will show
+                // viewport previews exactly what the card will show
                 HorizontalLayout {
                     alignment: center;
                     vp := Rectangle {
-                        width: 220px; height: 220px; border-radius: 110px;
+                        property <float> vw: crop-mode == "panel" ? 132 : 220;
+                        property <float> vh: 220;
+                        width: self.vw * 1px; height: 220px;
+                        border-radius: crop-mode == "panel" ? 8px : 110px;
                         border-width: 2px; border-color: Theme.acc;
                         background: #000000;
                         clip: true;
                         property <float> srcw: crop-src.width;
                         property <float> srch: crop-src.height;
-                        property <float> side: min(self.srcw, self.srch) / crop-zoom;
-                        property <float> px-per-src: 220 / self.side;
-                        property <float> sx: clamp(crop-cx * self.srcw - self.side / 2, 0, max(0, self.srcw - self.side));
-                        property <float> sy: clamp(crop-cy * self.srch - self.side / 2, 0, max(0, self.srch - self.side));
+                        // crop rect (source px) with the viewport's aspect
+                        property <float> cw: min(self.srcw, self.srch * self.vw / self.vh) / crop-zoom;
+                        property <float> ch: self.cw * self.vh / self.vw;
+                        property <float> px-per-src: self.vw / self.cw;
+                        property <float> sx: clamp(crop-cx * self.srcw - self.cw / 2, 0, max(0, self.srcw - self.cw));
+                        property <float> sy: clamp(crop-cy * self.srch - self.ch / 2, 0, max(0, self.srch - self.ch));
                         Image {
                             source: crop-src;
                             x: -vp.sx * vp.px-per-src * 1px;
@@ -1517,11 +1598,11 @@ export component AppWindow inherits Window {
                             }
                             moved => {
                                 crop-cx = clamp(
-                                    self.start-cx - (self.mouse-x - self.start-mx) / 220px * vp.side / vp.srcw,
-                                    vp.side / (2 * vp.srcw), 1 - vp.side / (2 * vp.srcw));
+                                    self.start-cx - (self.mouse-x - self.start-mx) / (vp.vw * 1px) * vp.cw / vp.srcw,
+                                    vp.cw / (2 * vp.srcw), 1 - vp.cw / (2 * vp.srcw));
                                 crop-cy = clamp(
-                                    self.start-cy - (self.mouse-y - self.start-my) / 220px * vp.side / vp.srch,
-                                    vp.side / (2 * vp.srch), 1 - vp.side / (2 * vp.srch));
+                                    self.start-cy - (self.mouse-y - self.start-my) / 220px * vp.ch / vp.srch,
+                                    vp.ch / (2 * vp.srch), 1 - vp.ch / (2 * vp.srch));
                             }
                         }
                     }
