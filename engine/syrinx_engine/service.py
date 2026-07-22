@@ -14,7 +14,7 @@ from dbus_next.constants import PropertyAccess
 from .tts import SpeechSynthesizer
 from .stt import Transcriber
 from .profiles import ProfileStore
-from .history import HistoryStore
+from .history import CaptureStore, HistoryStore
 from .llm import PersonalityLLM
 from .models import ModelManager, spec as model_spec, detect_hardware
 from . import audio, effects
@@ -40,6 +40,7 @@ class EngineInterface(ServiceInterface):
         self._tts = SpeechSynthesizer(self._profiles)
         self._stt = Transcriber()
         self._history = HistoryStore()
+        self._captures = CaptureStore()
         self._llm = PersonalityLLM()  # lazy — loads on first Compose/Rewrite
         self._models = ModelManager()
         # apply persisted active-model choices to the lazy components
@@ -488,6 +489,26 @@ class EngineInterface(ServiceInterface):
     async def HistoryAudioPath(self, hid: "s") -> "s":  # noqa: F821
         # Absolute WAV path so the app can copy it on "export audio".
         return self._history.audio_abs_path(hid)
+
+    # --- transcription captures (text only) -----------------------------
+
+    @method()
+    async def SaveCapture(self, text: "s") -> "s":  # noqa: F821
+        if not text.strip():
+            return ""
+        return self._captures.save(text).id
+
+    @method()
+    async def ListCaptures(self) -> "s":  # noqa: F821
+        return json.dumps([c.to_dict() for c in self._captures.list()])
+
+    @method()
+    async def UpdateCapture(self, capture_id: "s", text: "s") -> None:  # noqa: F821
+        self._captures.update(capture_id, text)
+
+    @method()
+    async def DeleteCapture(self, capture_id: "s") -> None:  # noqa: F821
+        self._captures.delete(capture_id)
 
     @method()
     def Cancel(self, gen_id: "u") -> None:  # noqa: F821

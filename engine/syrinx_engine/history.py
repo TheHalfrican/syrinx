@@ -199,3 +199,81 @@ class HistoryStore:
         """Absolute path of a clip's WAV (for the app to copy on export-audio)."""
         item = self.get(hid)
         return str(self._abs(item.audio_path)) if item else ""
+
+
+@dataclass
+class CaptureItem:
+    id: str
+    text: str
+    created_at: float
+    updated_at: float
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "text": self.text,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            # display string computed here — the app shows it verbatim
+            "date": time.strftime("%b %d · %H:%M", time.localtime(self.created_at)),
+        }
+
+
+class CaptureStore:
+    """Transcription captures — text only (no audio), table ``captures``.
+
+    Saved from the Transcription view; an update replaces the text of the
+    same row rather than creating a new one.
+    """
+
+    def __init__(self) -> None:
+        self._dir = _data_dir()
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._db = str(self._dir / "syrinx.db")
+        self._init_schema()
+
+    def _conn(self) -> sqlite3.Connection:
+        c = sqlite3.connect(self._db)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _init_schema(self) -> None:
+        with self._conn() as c:
+            c.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS captures(
+                    id TEXT PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    created_at REAL,
+                    updated_at REAL
+                );
+                """
+            )
+
+    def save(self, text: str) -> CaptureItem:
+        cid = uuid.uuid4().hex[:12]
+        now = time.time()
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO captures(id,text,created_at,updated_at) VALUES(?,?,?,?)",
+                (cid, text, now, now),
+            )
+        return CaptureItem(cid, text, now, now)
+
+    def list(self) -> list[CaptureItem]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM captures ORDER BY created_at DESC").fetchall()
+            return [
+                CaptureItem(r["id"], r["text"], r["created_at"] or 0.0, r["updated_at"] or 0.0)
+                for r in rows
+            ]
+
+    def update(self, cid: str, text: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "UPDATE captures SET text=?, updated_at=? WHERE id=?", (text, time.time(), cid)
+            )
+
+    def delete(self, cid: str) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM captures WHERE id=?", (cid,))

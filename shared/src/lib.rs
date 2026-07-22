@@ -143,6 +143,20 @@ pub trait Engine {
     /// Absolute WAV path of a history entry (for the app to copy on export-audio).
     fn history_audio_path(&self, hid: &str) -> zbus::Result<String>;
 
+    // --- transcription captures (text only, persisted) -------------------
+
+    /// Save a transcript as a capture; returns the new capture id ("" if empty).
+    fn save_capture(&self, text: &str) -> zbus::Result<String>;
+
+    /// List captures as a JSON array (newest first).
+    fn list_captures(&self) -> zbus::Result<String>;
+
+    /// Replace a capture's text in place (same entry, no new row).
+    fn update_capture(&self, capture_id: &str, text: &str) -> zbus::Result<()>;
+
+    /// Delete a capture.
+    fn delete_capture(&self, capture_id: &str) -> zbus::Result<()>;
+
     // --- model management ----------------------------------------------
 
     /// The model catalog as a JSON array (id, display, category, size, status…).
