@@ -546,6 +546,148 @@ component ModelRow inherits Rectangle {
     }
 }
 
+// --- shared bottom player bar (TTS view + Library) ---
+component PlayerBar inherits Rectangle {
+    in property <string> p-id;
+    in property <string> p-title;
+    in property <string> p-time;
+    in property <[float]> p-bars;
+    in property <bool> p-playing;
+    in-out property <bool> p-paused;
+    in-out property <bool> p-loop;
+    in-out property <float> p-volume;
+    in-out property <float> p-pct;
+    callback play();
+    callback pause();
+    callback resume();
+    callback seek(float);
+    callback toggle-loop(bool);
+    callback set-volume(float);
+    callback close();
+    height: 52px;
+    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+    border-radius: Theme.rad; background: Theme.card-bg;
+    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 10px; spacing: 10px;
+        // play / pause / resume
+        Rectangle {
+            width: 30px; height: 30px; y: parent.height / 2 - 15px;
+            border-radius: Theme.name == "win95" ? 0px : 15px;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.acc;
+            background: (ppb.pressed && Theme.name != "win95") ? Theme.acc-soft : Theme.gen-bg;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: ppb.pressed; }
+            ppb := TouchArea {
+                clicked => {
+                    if (!p-playing) {
+                        root.play();
+                    } else if (p-paused) {
+                        p-paused = false;
+                        root.resume();
+                    } else {
+                        p-paused = true;
+                        root.pause();
+                    }
+                }
+            }
+            Text { text: (p-playing && !p-paused) ? "⏸" : "▶"; font-size: 11px; color: Theme.gen-fg;
+                   horizontal-alignment: center; vertical-alignment: center; }
+        }
+        // title + time
+        VerticalLayout {
+            alignment: center; spacing: 1px; horizontal-stretch: 0;
+            Text { text: p-title; font-size: 11.5px; font-weight: 700; color: Theme.fg; overflow: elide; }
+            Text { text: p-time; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; }
+        }
+        // scrubbing waveform (mirrored around center; click or
+        // drag to seek) — wavesurfer-style pills: 2:1 bar/gap,
+        // fully rounded ends
+        Rectangle {
+            horizontal-stretch: 1; height: 32px; y: parent.height / 2 - 16px;
+            HorizontalLayout {
+                spacing: 0px;
+                for b[i] in p-bars : Rectangle {
+                    horizontal-stretch: 1;
+                    Rectangle {
+                        width: parent.width * 0.66;
+                        height: max(2px, b * 30px);
+                        y: (parent.height - self.height) / 2;
+                        border-radius: self.width / 2;
+                        background: i < p-pct * p-bars.length ? Theme.wave : Theme.wave-dim;
+                    }
+                }
+            }
+            seekta := TouchArea {
+                moved => {
+                    if (self.pressed) {
+                        p-pct = max(0.0, min(1.0, seekta.mouse-x / self.width));
+                    }
+                }
+                clicked => {
+                    p-pct = max(0.0, min(1.0, seekta.mouse-x / self.width));
+                    root.seek(p-pct);
+                }
+            }
+        }
+        // loop toggle (re-plays the clip when it ends)
+        VerticalLayout {
+            alignment: center;
+            IconBtn {
+                size: 26px; glyph-size: 12px; glyph: "⟳"; active: p-loop;
+                tip: p-loop ? "Looping" : "Loop";
+                clicked => { p-loop = !p-loop; root.toggle-loop(p-loop); }
+            }
+        }
+        // volume: mute toggle + slider
+        VerticalLayout {
+            alignment: center;
+            IconBtn {
+                size: 26px; glyph-size: 12px;
+                glyph: p-volume == 0.0 ? "∅" : "♪";
+                tip: p-volume == 0.0 ? "Unmute" : "Mute";
+                clicked => {
+                    p-volume = p-volume == 0.0 ? 1.0 : 0.0;
+                    root.set-volume(p-volume);
+                }
+            }
+        }
+        Rectangle {
+            width: 64px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    height: 5px; border-radius: 2.5px; background: Theme.chip-bg;
+                    Rectangle {
+                        x: 0; y: 0; height: 100%; border-radius: 2.5px;
+                        width: parent.width * p-volume;
+                        background: Theme.acc;
+                    }
+                }
+            }
+            vta := TouchArea {
+                clicked => {
+                    p-volume = max(0.0, min(1.0, vta.mouse-x / self.width));
+                    root.set-volume(p-volume);
+                }
+                moved => {
+                    if (vta.pressed) {
+                        p-volume = max(0.0, min(1.0, vta.mouse-x / self.width));
+                        root.set-volume(p-volume);
+                    }
+                }
+            }
+        }
+        // close (hides the bar; playback keeps its state)
+        VerticalLayout {
+            alignment: center;
+            IconBtn {
+                size: 26px; glyph-size: 11px; glyph: "✕"; tip: "Hide player";
+                clicked => { root.close(); }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Syrinx";
     preferred-width: 1180px;
@@ -772,6 +914,9 @@ export component AppWindow inherits Window {
     in property <[string]> lib-voice-names: ["All voices"];
     in-out property <int> lib-voice-index: 0;
     in-out property <int> lib-type-index: 0;   // All / TTS / speech VC / music
+    // model filter — options depend on the type chosen (set from Rust)
+    in property <[string]> lib-model-names: ["All models"];
+    in-out property <int> lib-model-index: 0;
     in-out property <bool> lib-starred-only: false;
     in property <string> lib-count-line;
     in-out property <string> lib-tag-id: "";   // row whose tags are being edited
@@ -1119,130 +1264,20 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // ---- player: spawns under the text box after a generation ----
-                            if player-active && player-active-visible : Rectangle {
-                                height: 52px;
-                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
-                                border-radius: Theme.rad; background: Theme.card-bg;
-                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
-                                HorizontalLayout {
-                                    padding-left: 10px; padding-right: 10px; spacing: 10px;
-                                    // play / pause / resume
-                                    Rectangle {
-                                        width: 30px; height: 30px; y: parent.height / 2 - 15px;
-                                        border-radius: Theme.name == "win95" ? 0px : 15px;
-                                        border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.acc;
-                                        background: (ppb.pressed && Theme.name != "win95") ? Theme.acc-soft : Theme.gen-bg;
-                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: ppb.pressed; }
-                                        ppb := TouchArea {
-                                            clicked => {
-                                                if (!player-playing) {
-                                                    root.play-hist(player-id);
-                                                } else if (player-paused) {
-                                                    player-paused = false;
-                                                    root.resume();
-                                                } else {
-                                                    player-paused = true;
-                                                    root.pause();
-                                                }
-                                            }
-                                        }
-                                        Text { text: (player-playing && !player-paused) ? "⏸" : "▶"; font-size: 11px; color: Theme.gen-fg;
-                                               horizontal-alignment: center; vertical-alignment: center; }
-                                    }
-                                    // title + time
-                                    VerticalLayout {
-                                        alignment: center; spacing: 1px; horizontal-stretch: 0;
-                                        Text { text: player-title; font-size: 11.5px; font-weight: 700; color: Theme.fg; overflow: elide; }
-                                        Text { text: player-time; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; }
-                                    }
-                                    // scrubbing waveform (mirrored around center; click or
-                                    // drag to seek) — wavesurfer-style pills: 2:1 bar/gap,
-                                    // fully rounded ends
-                                    Rectangle {
-                                        horizontal-stretch: 1; height: 32px; y: parent.height / 2 - 16px;
-                                        HorizontalLayout {
-                                            spacing: 0px;
-                                            for b[i] in player-bars : Rectangle {
-                                                horizontal-stretch: 1;
-                                                Rectangle {
-                                                    width: parent.width * 0.66;
-                                                    height: max(2px, b * 30px);
-                                                    y: (parent.height - self.height) / 2;
-                                                    border-radius: self.width / 2;
-                                                    background: i < play-pct * player-bars.length ? Theme.wave : Theme.wave-dim;
-                                                }
-                                            }
-                                        }
-                                        seekta := TouchArea {
-                                            moved => {
-                                                if (self.pressed) {
-                                                    play-pct = max(0.0, min(1.0, seekta.mouse-x / self.width));
-                                                }
-                                            }
-                                            clicked => {
-                                                play-pct = max(0.0, min(1.0, seekta.mouse-x / self.width));
-                                                root.seek(player-id, play-pct);
-                                            }
-                                        }
-                                    }
-                                    // loop toggle (re-plays the clip when it ends)
-                                    VerticalLayout {
-                                        alignment: center;
-                                        IconBtn {
-                                            size: 26px; glyph-size: 12px; glyph: "⟳"; active: player-loop;
-                                            tip: player-loop ? "Looping" : "Loop";
-                                            clicked => { player-loop = !player-loop; root.toggle-loop(player-loop); }
-                                        }
-                                    }
-                                    // volume: mute toggle + slider
-                                    VerticalLayout {
-                                        alignment: center;
-                                        IconBtn {
-                                            size: 26px; glyph-size: 12px;
-                                            glyph: player-volume == 0.0 ? "∅" : "♪";
-                                            tip: player-volume == 0.0 ? "Unmute" : "Mute";
-                                            clicked => {
-                                                player-volume = player-volume == 0.0 ? 1.0 : 0.0;
-                                                root.set-volume(player-volume);
-                                            }
-                                        }
-                                    }
-                                    Rectangle {
-                                        width: 64px;
-                                        VerticalLayout {
-                                            alignment: center;
-                                            Rectangle {
-                                                height: 5px; border-radius: 2.5px; background: Theme.chip-bg;
-                                                Rectangle {
-                                                    x: 0; y: 0; height: 100%; border-radius: 2.5px;
-                                                    width: parent.width * player-volume;
-                                                    background: Theme.acc;
-                                                }
-                                            }
-                                        }
-                                        vta := TouchArea {
-                                            clicked => {
-                                                player-volume = max(0.0, min(1.0, vta.mouse-x / self.width));
-                                                root.set-volume(player-volume);
-                                            }
-                                            moved => {
-                                                if (vta.pressed) {
-                                                    player-volume = max(0.0, min(1.0, vta.mouse-x / self.width));
-                                                    root.set-volume(player-volume);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // close (hides the bar; playback keeps its state)
-                                    VerticalLayout {
-                                        alignment: center;
-                                        IconBtn {
-                                            size: 26px; glyph-size: 11px; glyph: "✕"; tip: "Hide player";
-                                            clicked => { player-active-visible = false; }
-                                        }
-                                    }
-                                }
+                            // ---- player: spawns under the text box after a generation
+                            // (shared PlayerBar — the Library renders the same one) ----
+                            if player-active && player-active-visible : PlayerBar {
+                                p-id: player-id; p-title: player-title; p-time: player-time;
+                                p-bars: player-bars; p-playing: player-playing;
+                                p-paused <=> player-paused; p-loop <=> player-loop;
+                                p-volume <=> player-volume; p-pct <=> play-pct;
+                                play => { root.play-hist(player-id); }
+                                pause => { root.pause(); }
+                                resume => { root.resume(); }
+                                seek(p) => { root.seek(player-id, p); }
+                                toggle-loop(on) => { root.toggle-loop(on); }
+                                set-volume(v) => { root.set-volume(v); }
+                                close => { player-active-visible = false; }
                             }
                         }
 
@@ -2049,10 +2084,17 @@ export component AppWindow inherits Window {
                                 width: 140px;
                                 model: ["All types", "TTS", "⇄ Speech VC", "♫ Music"];
                                 current-index <=> lib-type-index;
+                                // a new type invalidates the model choice
+                                selected(i) => { lib-model-index = 0; root.lib-refilter(); }
+                            }
+                            ThemedDropdown {
+                                width: 150px;
+                                model: lib-model-names;
+                                current-index <=> lib-model-index;
                                 selected(i) => { root.lib-refilter(); }
                             }
                             ThemedDropdown {
-                                width: 160px;
+                                width: 150px;
                                 model: lib-voice-names;
                                 current-index <=> lib-voice-index;
                                 selected(i) => { root.lib-refilter(); }
@@ -2073,7 +2115,7 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 for r in lib-rows : Rectangle {
                                     // fixed height so the ScrollView scrolls
-                                    height: 118px;
+                                    height: 126px;
                                     border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
                                     border-radius: Theme.rad; background: Theme.card-bg;
                                     if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
@@ -2104,64 +2146,47 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         HorizontalLayout {
-                                            spacing: 4px;
-                                            Rectangle {
-                                                width: 24px; height: 20px; border-radius: Theme.rad;
-                                                background: lbp.has-hover ? Theme.acc-soft : transparent;
-                                                lbp := TouchArea {
-                                                    clicked => {
-                                                        if (player-id == r.id && player-playing) { root.stop(); }
-                                                        else { root.play-hist(r.id); }
-                                                    }
-                                                }
-                                                Text {
-                                                    text: player-id == r.id && player-playing ? "■" : "▶";
-                                                    font-size: 11px;
-                                                    color: player-id == r.id && player-playing ? Theme.acc : Theme.dim;
-                                                    horizontal-alignment: center; vertical-alignment: center;
+                                            spacing: 5px;
+                                            IconBtn {
+                                                size: 22px; glyph-size: 10px;
+                                                glyph: player-id == r.id && player-playing ? "■" : "▶";
+                                                active: player-id == r.id && player-playing;
+                                                tip: player-id == r.id && player-playing ? "Stop" : "Play";
+                                                clicked => {
+                                                    if (player-id == r.id && player-playing) { root.stop(); }
+                                                    else { root.play-hist(r.id); }
                                                 }
                                             }
-                                            Rectangle {
-                                                width: 24px; height: 20px; border-radius: Theme.rad;
-                                                background: lbs.has-hover ? Theme.acc-soft : transparent;
-                                                lbs := TouchArea { clicked => { root.star-hist(r.id, !r.starred); } }
-                                                Text { text: r.starred ? "★" : "☆"; font-size: 11px; color: r.starred ? Theme.acc : Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            IconBtn {
+                                                size: 22px; glyph-size: 10px;
+                                                glyph: r.starred ? "★" : "☆"; active: r.starred;
+                                                tip: r.starred ? "Unstar" : "Star";
+                                                clicked => { root.star-hist(r.id, !r.starred); }
                                             }
-                                            Rectangle {
-                                                width: 24px; height: 20px; border-radius: Theme.rad;
-                                                background: lbe.has-hover ? Theme.acc-soft : transparent;
-                                                lbe := TouchArea { clicked => { root.export-audio(r.id); } }
-                                                Text { text: "⇩"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            IconBtn {
+                                                size: 22px; glyph-size: 10px; glyph: "⇩"; tip: "Export audio (.wav)";
+                                                clicked => { root.export-audio(r.id); }
                                             }
-                                            Rectangle {
-                                                width: 24px; height: 20px; border-radius: Theme.rad;
-                                                background: lbk.has-hover ? Theme.acc-soft : transparent;
-                                                lbk := TouchArea { clicked => { root.export-package(r.id); } }
-                                                Text { text: "⇪"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            IconBtn {
+                                                size: 22px; glyph-size: 10px; glyph: "⇪"; tip: "Export package (.zip)";
+                                                clicked => { root.export-package(r.id); }
                                             }
-                                            Rectangle {
-                                                width: 24px; height: 20px; border-radius: Theme.rad;
-                                                background: lbf.has-hover ? Theme.acc-soft : transparent;
-                                                lbf := TouchArea { clicked => { root.fx-id = r.id; root.fx-voice = r.title; root.fx-index = 0; } }
-                                                Text { text: "✧"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            IconBtn {
+                                                size: 22px; glyph-size: 10px; glyph: "✧"; tip: "Apply effects";
+                                                clicked => { root.fx-id = r.id; root.fx-voice = r.title; root.fx-index = 0; }
                                             }
-                                            Rectangle {
-                                                width: 24px; height: 20px; border-radius: Theme.rad;
-                                                background: lbt.has-hover ? Theme.acc-soft : transparent;
-                                                lbt := TouchArea {
-                                                    clicked => {
-                                                        lib-tag-id = r.id;
-                                                        lib-tag-title = r.title;
-                                                        lib-tag-value = r.tags;
-                                                    }
+                                            IconBtn {
+                                                size: 22px; glyph-size: 10px; glyph: "#"; active: r.tags != "";
+                                                tip: r.tags == "" ? "Add tags" : "Edit tags";
+                                                clicked => {
+                                                    lib-tag-id = r.id;
+                                                    lib-tag-title = r.title;
+                                                    lib-tag-value = r.tags;
                                                 }
-                                                Text { text: "#"; font-size: 11px; font-weight: 700; color: r.tags != "" ? Theme.acc : Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
                                             }
-                                            Rectangle {
-                                                width: 24px; height: 20px; border-radius: Theme.rad;
-                                                background: lbd.has-hover ? Theme.acc-soft : transparent;
-                                                lbd := TouchArea { clicked => { root.delete-hist(r.id); } }
-                                                Text { text: "✕"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            IconBtn {
+                                                size: 22px; glyph-size: 10px; glyph: "✕"; tip: "Delete";
+                                                clicked => { root.delete-hist(r.id); }
                                             }
                                             Rectangle { width: 6px; }
                                             Text {
@@ -2178,6 +2203,20 @@ export component AppWindow inherits Window {
                                     color: Theme.dim; horizontal-alignment: center;
                                 }
                             }
+                        }
+                        // the same bottom player the TTS view shows
+                        if player-active && player-active-visible : PlayerBar {
+                            p-id: player-id; p-title: player-title; p-time: player-time;
+                            p-bars: player-bars; p-playing: player-playing;
+                            p-paused <=> player-paused; p-loop <=> player-loop;
+                            p-volume <=> player-volume; p-pct <=> play-pct;
+                            play => { root.play-hist(player-id); }
+                            pause => { root.pause(); }
+                            resume => { root.resume(); }
+                            seek(p) => { root.seek(player-id, p); }
+                            toggle-loop(on) => { root.toggle-loop(on); }
+                            set-volume(v) => { root.set-volume(v); }
+                            close => { player-active-visible = false; }
                         }
                     }
 

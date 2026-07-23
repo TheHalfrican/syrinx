@@ -69,7 +69,7 @@ enum Cmd {
     VcAudition { id: String },
     // library (▤ tab)
     LibLoad,
-    LibRefilter { q: String, type_idx: i32, voice_idx: i32, starred: bool },
+    LibRefilter { q: String, type_idx: i32, voice_idx: i32, starred: bool, model_idx: i32 },
     LibSaveTags { id: String, csv: String },
     // voices tab (profile table + inspector)
     VoicesLoad,
@@ -328,6 +328,7 @@ fn main() -> anyhow::Result<()> {
                 type_idx: ui.get_lib_type_index(),
                 voice_idx: ui.get_lib_voice_index(),
                 starred: ui.get_lib_starred_only(),
+                model_idx: ui.get_lib_model_index(),
             });
         });
     }
@@ -1464,9 +1465,44 @@ struct LibRow {
     text: String,
     starred: bool,
     tags: Vec<String>,
-    voice: String, // ♫-stripped first title segment, for the voice filter
-    kind: u8,      // 0 = TTS, 1 = speech VC, 2 = music
-    blob: String,  // lowercased title+text+tags, for search
+    voice: String,  // ♫-stripped first title segment, for the voice filter
+    kind: u8,       // 0 = TTS, 1 = speech VC, 2 = music
+    engine: String, // engine id, for the model filter
+    blob: String,   // lowercased title+text+tags, for search
+}
+
+/// Engine id → display label for the Library's model filter and row meta.
+const LIB_ENGINE_LABELS: &[(&str, &str)] = &[
+    ("kokoro", "Kokoro"),
+    ("qwen", "Qwen TTS"),
+    ("qwen_custom_voice", "Qwen CustomVoice"),
+    ("luxtts", "LuxTTS"),
+    ("chatterbox", "Chatterbox"),
+    ("chatterbox_turbo", "Chatterbox Turbo"),
+    ("tada", "TADA"),
+    ("chatterbox_vc", "Chatterbox VC"),
+    ("seed_vc", "Seed-VC"),
+    ("vevo_timbre", "Vevo-Timbre"),
+];
+
+fn lib_engine_label(engine: &str) -> &str {
+    LIB_ENGINE_LABELS
+        .iter()
+        .find(|(id, _)| *id == engine)
+        .map(|(_, l)| *l)
+        .unwrap_or(engine)
+}
+
+/// Model-filter options per type-dropdown index (0=All, 1=TTS, 2=speech VC,
+/// 3=music). Music lists the singing-capable engines (Vevo2 joins later).
+fn lib_engines_for_type(type_idx: i32) -> Vec<&'static str> {
+    match type_idx {
+        1 => vec!["kokoro", "qwen", "qwen_custom_voice", "luxtts",
+                  "chatterbox", "chatterbox_turbo", "tada"],
+        2 => vec!["chatterbox_vc", "seed_vc", "vevo_timbre"],
+        3 => VC_MUSIC_ENGINE_IDS.to_vec(),
+        _ => LIB_ENGINE_LABELS.iter().map(|(e, _)| *e).collect(),
+    }
 }
 
 /// Fetch and classify all generations for the Library.
@@ -1496,9 +1532,12 @@ async fn lib_load(proxy: &EngineProxy<'_>) -> (Vec<LibRow>, Vec<String>) {
             .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
             .unwrap_or_default();
         let text = s("text");
+        // the same details the TTS history cards carry: type · model ·
+        // length · language, plus the date
         let meta = format!(
-            "{} · {} · {} · {}",
+            "{} · {} · {} · {} · {}",
             ["TTS", "⇄ VC", "♫ VC"][kind as usize],
+            lib_engine_label(&engine),
             fmt_dur(dur), s("language"), s("date"),
         );
         let blob = format!("{} {} {}", title, text, tags.join(" ")).to_lowercase();
@@ -1508,7 +1547,7 @@ async fn lib_load(proxy: &EngineProxy<'_>) -> (Vec<LibRow>, Vec<String>) {
         rows.push(LibRow {
             id: s("id"), title, meta, text,
             starred: h.get("starred").and_then(|v| v.as_bool()).unwrap_or(false),
-            tags, voice, kind, blob,
+            tags, voice, kind, engine, blob,
         });
     }
     voices.sort();
@@ -1520,12 +1559,19 @@ fn lib_apply(
     ui: &slint::Weak<AppWindow>,
     rows: &[LibRow],
     voices: &[String],
-    filters: &(String, i32, i32, bool),
+    filters: &(String, i32, i32, bool, i32),
 ) {
-    let (q, type_idx, voice_idx, starred_only) = filters;
+    let (q, type_idx, voice_idx, starred_only, model_idx) = filters;
     let q = q.trim().to_lowercase();
     let want_voice = if *voice_idx > 0 {
         voices.get((*voice_idx - 1) as usize).cloned()
+    } else {
+        None
+    };
+    // model options follow the chosen type; index 0 = All models
+    let type_engines = lib_engines_for_type(*type_idx);
+    let want_engine = if *model_idx > 0 {
+        type_engines.get((*model_idx - 1) as usize).copied()
     } else {
         None
     };
@@ -1534,6 +1580,7 @@ fn lib_apply(
         .filter(|r| q.is_empty() || r.blob.contains(&q))
         .filter(|r| *type_idx == 0 || r.kind == (*type_idx - 1) as u8)
         .filter(|r| want_voice.as_deref().is_none_or(|v| r.voice == v))
+        .filter(|r| want_engine.is_none_or(|e| r.engine == e))
         .filter(|r| !*starred_only || r.starred)
         .map(|r| LibItem {
             id: r.id.clone().into(),
@@ -1549,9 +1596,15 @@ fn lib_apply(
         .chain(voices.iter().map(|v| SharedString::from(v.as_str())))
         .collect();
     let voice_count = names.len() as i32;
+    let model_names: Vec<SharedString> = std::iter::once(SharedString::from("All models"))
+        .chain(type_engines.iter().map(|e| SharedString::from(lib_engine_label(e))))
+        .collect();
+    let model_count = model_names.len() as i32;
     ui.upgrade_in_event_loop(move |ui| {
         if ui.get_lib_voice_index() >= voice_count { ui.set_lib_voice_index(0); }
+        if ui.get_lib_model_index() >= model_count { ui.set_lib_model_index(0); }
         ui.set_lib_voice_names(ModelRc::from(Rc::new(VecModel::from(names))));
+        ui.set_lib_model_names(ModelRc::from(Rc::new(VecModel::from(model_names))));
         ui.set_lib_rows(ModelRc::from(Rc::new(VecModel::from(shown))));
         ui.set_lib_count_line(count.into());
     })
@@ -1801,7 +1854,7 @@ async fn worker(
     let mut lib_rows: Vec<LibRow> = Vec::new();
     let mut lib_voices: Vec<String> = Vec::new();
     let mut lib_loaded = false;
-    let mut lib_filters: (String, i32, i32, bool) = (String::new(), 0, 0, false);
+    let mut lib_filters: (String, i32, i32, bool, i32) = (String::new(), 0, 0, false, 0);
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -3184,8 +3237,8 @@ async fn worker(
                     lib_loaded = true;
                     lib_apply(&ui, &lib_rows, &lib_voices, &lib_filters);
                 }
-                Some(Cmd::LibRefilter { q, type_idx, voice_idx, starred }) => {
-                    lib_filters = (q, type_idx, voice_idx, starred);
+                Some(Cmd::LibRefilter { q, type_idx, voice_idx, starred, model_idx }) => {
+                    lib_filters = (q, type_idx, voice_idx, starred, model_idx);
                     lib_apply(&ui, &lib_rows, &lib_voices, &lib_filters);
                 }
                 Some(Cmd::LibSaveTags { id, csv }) => {
