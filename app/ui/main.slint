@@ -573,6 +573,7 @@ export component AppWindow inherits Window {
     in property <bool> cv-recording;
     in property <bool> cv-transcribing;
     in property <bool> cv-creating;
+    in-out property <string> cv-error: "";  // last create/edit failure, shown in the modal footer
     in property <string> cv-sample-label;
     in-out property <string> cv-name;
     in-out property <string> cv-desc;
@@ -760,6 +761,7 @@ export component AppWindow inherits Window {
                                     cv-edit-id = ""; cv-model-index = 0;
                                     cv-lang-index = 0; cv-language = "en";
                                     cv-has-avatar = false;
+                                    cv-error = "";
                                     cv-open = true;
                                 } }
                             }
@@ -1760,7 +1762,14 @@ export component AppWindow inherits Window {
                     height: 56px;
                     Rectangle { x: 0; y: 0; width: 100%; height: 1px; background: Theme.brd; }
                     HorizontalLayout {
-                        padding-left: 18px; padding-right: 18px; spacing: 10px; alignment: end;
+                        padding-left: 18px; padding-right: 18px; spacing: 10px;
+                        if cv-error != "" : Text {
+                            text: "⚠ " + cv-error;
+                            font-size: 10px; font-family: Theme.mono; color: #cc3b3b;
+                            vertical-alignment: center; overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        if cv-error == "" : Rectangle { horizontal-stretch: 1; }
                         TBtn { label: "Cancel"; clicked => { root.cv-cancel(); cv-open = false; } }
                         TBtn {
                             label: cv-edit-id != "" ? (cv-creating ? "Saving…" : "✦ Save changes")

@@ -755,6 +755,16 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
     GridData { grid, kokoro_names, kokoro_ids, default_selected }
 }
 
+/// Short human message for a failed profile D-Bus call.
+fn profile_err_msg(e: &zbus::Error) -> String {
+    let s = e.to_string();
+    if s.contains("UNIQUE constraint failed: profiles.name") {
+        "A voice with that name already exists.".into()
+    } else {
+        s
+    }
+}
+
 /// Temp WAV path for in-modal recording (runtime dir → RAM, cleaned on logout).
 fn cv_wav_path() -> String {
     std::env::var("XDG_RUNTIME_DIR")
@@ -1626,11 +1636,21 @@ async fn worker(
                 }
                 Some(Cmd::CvTranscribe) => {
                     if let Some(path) = cv_sample.clone() {
-                        ui.upgrade_in_event_loop(|ui| ui.set_cv_transcribing(true)).ok();
-                        let text = proxy.transcribe(&path).await.unwrap_or_default();
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_cv_error("".into());
+                            ui.set_cv_transcribing(true);
+                        }).ok();
+                        let result = proxy.transcribe(&path).await;
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_cv_transcribing(false);
-                            ui.set_cv_transcript(text.into());
+                            match result {
+                                Ok(text) => ui.set_cv_transcript(text.into()),
+                                Err(e) => ui.set_cv_error(format!("Transcribe failed: {e}").into()),
+                            }
+                        }).ok();
+                    } else {
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_cv_error("Record or choose a reference clip first.".into());
                         }).ok();
                     }
                 }
@@ -1646,7 +1666,8 @@ async fn worker(
                             .map(|(_, e)| e.clone())
                             .unwrap_or_default()
                     };
-                    if let Some(pid) = cv_edit.take() {
+                    ui.upgrade_in_event_loop(|ui| ui.set_cv_error("".into())).ok();
+                    if let Some(pid) = cv_edit.clone() {
                         // edit mode: patch metadata + optionally replace audio
                         let patch = serde_json::json!({
                             "name": name, "description": desc,
@@ -1655,6 +1676,7 @@ async fn worker(
                         }).to_string();
                         match proxy.update_profile(&pid, &patch).await {
                             Ok(_) => {
+                                let mut sample_err = String::new();
                                 if let Some((path, amode, asx, asy, asw, ash)) = cv_avatar.take() {
                                     proxy.set_profile_avatar(&pid, &path, &amode, asx, asy, asw, ash).await.ok();
                                 }
@@ -1671,6 +1693,10 @@ async fn worker(
                                     }
                                     if let Err(e) = proxy.add_sample(&pid, &sample, &transcript).await {
                                         tracing::error!("replace sample failed: {e}");
+                                        sample_err = format!(
+                                            "Replacing the sample failed: {} — record a new clip and save again.",
+                                            profile_err_msg(&e)
+                                        );
                                     }
                                 } else if transcript.trim() != cv_edit_transcript.trim()
                                     && !transcript.trim().is_empty()
@@ -1691,29 +1717,44 @@ async fn worker(
                                     }
                                 }
                                 refresh_grid(&ui, &proxy, &mut avatar_cache).await;
-                                let pid2 = pid.clone();
-                                let name2 = name.clone();
-                                let hp = !personality.trim().is_empty();
-                                ui.upgrade_in_event_loop(move |ui| {
-                                    ui.set_cv_open(false);
-                                    ui.set_cv_edit_id("".into());
-                                    ui.set_cv_name("".into());
-                                    ui.set_cv_desc("".into());
-                                    ui.set_cv_personality("".into());
-                                    ui.set_cv_transcript("".into());
-                                    ui.set_cv_sample_label("".into());
-                                    ui.set_cv_model_index(0);
-                                    ui.set_cv_has_avatar(false);
-                                    if ui.get_selected_voice().as_str() == pid2 {
-                                        ui.set_selected_voice_name(name2.into());
-                                        ui.set_selected_has_personality(hp);
-                                    }
-                                }).ok();
+                                if sample_err.is_empty() {
+                                    cv_edit = None;
+                                    let pid2 = pid.clone();
+                                    let name2 = name.clone();
+                                    let hp = !personality.trim().is_empty();
+                                    ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_cv_open(false);
+                                        ui.set_cv_edit_id("".into());
+                                        ui.set_cv_name("".into());
+                                        ui.set_cv_desc("".into());
+                                        ui.set_cv_personality("".into());
+                                        ui.set_cv_transcript("".into());
+                                        ui.set_cv_sample_label("".into());
+                                        ui.set_cv_model_index(0);
+                                        ui.set_cv_has_avatar(false);
+                                        if ui.get_selected_voice().as_str() == pid2 {
+                                            ui.set_selected_voice_name(name2.into());
+                                            ui.set_selected_has_personality(hp);
+                                        }
+                                    }).ok();
+                                } else {
+                                    // keep the modal open in edit mode so a re-record can retry
+                                    ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_cv_sample_label("".into());
+                                        ui.set_cv_error(sample_err.into());
+                                    }).ok();
+                                }
                             }
-                            Err(e) => tracing::error!("edit voice failed: {e}"),
+                            Err(e) => {
+                                tracing::error!("edit voice failed: {e}");
+                                let msg = profile_err_msg(&e);
+                                ui.upgrade_in_event_loop(move |ui| ui.set_cv_error(msg.into())).ok();
+                            }
                         }
                     } else if name.trim().is_empty() || cv_sample.is_none() {
-                        tracing::warn!("create voice: needs a name and a reference sample");
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_cv_error("A name and a reference sample are both required.".into());
+                        }).ok();
                     } else {
                         ui.upgrade_in_event_loop(|ui| ui.set_cv_creating(true)).ok();
                         let sample = cv_sample.clone().unwrap();
@@ -1724,7 +1765,11 @@ async fn worker(
                         }).to_string();
                         let outcome = async {
                             let pid = proxy.create_profile(&spec).await?;
-                            proxy.add_sample(&pid, &sample, &transcript).await?;
+                            if let Err(e) = proxy.add_sample(&pid, &sample, &transcript).await {
+                                // roll back so a failed create leaves no sample-less ghost
+                                proxy.delete_profile(&pid).await.ok();
+                                return Err(e);
+                            }
                             zbus::Result::Ok(pid)
                         }.await;
                         match outcome {
@@ -1759,7 +1804,11 @@ async fn worker(
                             }
                             Err(e) => {
                                 tracing::error!("create voice failed: {e}");
-                                ui.upgrade_in_event_loop(|ui| ui.set_cv_creating(false)).ok();
+                                let msg = profile_err_msg(&e);
+                                ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_cv_creating(false);
+                                    ui.set_cv_error(msg.into());
+                                }).ok();
                             }
                         }
                     }
@@ -2013,6 +2062,7 @@ async fn worker(
                         cv_sample = None;
                         cv_avatar = None;
                         ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_cv_error("".into());
                             ui.set_cv_name(name.into());
                             ui.set_cv_desc(desc.into());
                             ui.set_cv_personality(pers.into());
