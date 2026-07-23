@@ -96,7 +96,7 @@ pub trait Engine {
     /// its text and folds `label` into the display name. Returns a generation
     /// id; progress/errors arrive via `GenerationProgress`, and the result
     /// auto-plays and lands in history like Speak.
-    fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str, label: &str, transcript: &str, mode: &str) -> zbus::Result<u32>;
+    fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str, label: &str, transcript: &str, mode: &str, semitones: i32) -> zbus::Result<u32>;
 
     /// Copy an audio file into the voice-changer clip store; returns the new
     /// clip id ("" on failure). An empty name gets a time-based default;

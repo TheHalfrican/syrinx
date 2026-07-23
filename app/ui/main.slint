@@ -762,6 +762,7 @@ export component AppWindow inherits Window {
     // music mode = singing-capable engines only (Vevo2 joins here)
     in property <[string]> vc-music-engine-names: ["Seed-VC (singing)"];
     in-out property <int> vc-music-engine-index: 0;
+    in-out property <int> vc-octave-index: 2;    // 0..4 → −2..+2 octaves (♫ register shift)
     in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)
     // conversion results (right rail), split by mode — the ♫ title marker
     // decides which list a row lands in
@@ -2007,6 +2008,14 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     model: vc-music-engine-names;
                                     current-index <=> vc-music-engine-index;
+                                }
+                                // octave shifter — moves the sung register in
+                                // key-preserving ±12-semitone steps (deep
+                                // voices sing high songs an octave down)
+                                if vc-mode == "music" : ThemedDropdown {
+                                    width: 88px;
+                                    model: ["−2 oct", "−1 oct", "±0 oct", "+1 oct", "+2 oct"];
+                                    current-index <=> vc-octave-index;
                                 }
                                 TBtn {
                                     label: vc-busy ? "…" : (vc-mode == "music" ? "♫ Convert" : "⇄ Convert");

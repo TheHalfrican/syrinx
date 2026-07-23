@@ -69,7 +69,7 @@ enum Cmd {
     VcLoad,
     VcToggleRecord { system: bool },
     VcPickFile,
-    VcConvert { index: usize, engine_index: usize, label: String, transcript: String, mode: String },
+    VcConvert { index: usize, engine_index: usize, label: String, transcript: String, mode: String, semitones: i32 },
     VcSaveClip { name: String, transcript: String },
     VcDeleteClip { id: String },
     VcArmClip { id: String },
@@ -600,8 +600,14 @@ fn main() -> anyhow::Result<()> {
             } else {
                 ui.get_vc_engine_index().max(0) as usize
             };
+            // ♫ octave dropdown: index 0..4 → −2..+2 octaves, in semitones
+            let semitones = if mode == "music" {
+                (ui.get_vc_octave_index().clamp(0, 4) - 2) * 12
+            } else {
+                0
+            };
             let _ = tx.send(Cmd::VcConvert {
-                index: i.max(0) as usize, engine_index, label, transcript, mode,
+                index: i.max(0) as usize, engine_index, label, transcript, mode, semitones,
             });
         });
     }
@@ -3495,13 +3501,13 @@ async fn worker(
                         }
                     }
                 }
-                Some(Cmd::VcConvert { index, engine_index, label, transcript, mode }) => {
+                Some(Cmd::VcConvert { index, engine_index, label, transcript, mode, semitones }) => {
                     if let (Some(src), Some(pid)) =
                         (vc_source.clone(), vc_voice_ids.get(index).cloned())
                     {
                         let table = if mode == "music" { VC_MUSIC_ENGINE_IDS } else { VC_ENGINE_IDS };
                         let engine = table.get(engine_index).copied().unwrap_or("");
-                        match proxy.convert_voice(&src, &pid, engine, &label, &transcript, &mode).await {
+                        match proxy.convert_voice(&src, &pid, engine, &label, &transcript, &mode, semitones).await {
                             Ok(gid) if gid != 0 => {
                                 pending_vc = gid;
                                 // the rail's ■ and the player bar stop via

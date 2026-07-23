@@ -210,22 +210,24 @@ class EngineInterface(ServiceInterface):
         return req_id
 
     @method()
-    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s", label: "s", transcript: "s", mode: "s") -> "u":  # noqa: F821
+    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s", label: "s", transcript: "s", mode: "s", semitones: "i") -> "u":  # noqa: F821
         """Style-preserved voice conversion (the ⇄ tab): re-render the speech
         in *audio_path* with a cloned profile's voice, keeping the source's
         delivery (words/timing/prosody — only the timbre changes). *engine*
         "" = the default (chatterbox_vc; seed_vc when *mode* is "music").
         *mode* "music" runs the song pipeline: demucs vocal split →
-        f0-conditioned conversion → remix over the instrumental. The history
+        f0-conditioned conversion → remix over the instrumental; *semitones*
+        shifts the sung melody (octave steps keep the song's key — register
+        wrangling for deep/high voices; ignored for speech mode). The history
         row stores *transcript* (the source's words) as its text and folds
         *label* into the display name ("<voice> · <label>"). Returns a
         generation id; progress and errors arrive via GenerationProgress, and
         the result auto-plays and lands in history exactly like Speak."""
-        return self._start_convert(audio_path, profile_id, engine, label, transcript, mode)
+        return self._start_convert(audio_path, profile_id, engine, label, transcript, mode, semitones)
 
     def _start_convert(
         self, audio_path: str, profile_id: str, engine: str, label: str,
-        transcript: str, mode: str,
+        transcript: str, mode: str, semitones: int = 0,
     ) -> int:
         gen_id = self._next_gen_id
         self._next_gen_id += 1
@@ -253,6 +255,7 @@ class EngineInterface(ServiceInterface):
                     pcm, rate = await be.convert_music(
                         audio_path, prof,
                         on_stage=lambda s: self.GenerationProgress(gen_id, s, 0.5),
+                        semitone=semitones,
                     )
                 else:
                     self.GenerationProgress(gen_id, "converting", 0.3)
