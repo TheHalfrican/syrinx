@@ -25,6 +25,9 @@ fi
 
 .venv-seedvc/bin/pip install seed-vc
 
+# music mode: demucs separates the vocal stem inside this same worker venv
+.venv-seedvc/bin/pip install demucs
+
 # huggingface_hub 1.x removed the proxies/resume_download kwargs that
 # BigVGAN's _from_pretrained (inside seed-vc) still requires, and
 # transformers 5.x demands hub>=1.5 — pin the pair to the 4.x era.
@@ -32,6 +35,7 @@ fi
 
 .venv-seedvc/bin/python - <<'EOF'
 import huggingface_hub, numpy, seed_vc, torch, transformers
+from demucs.api import Separator  # noqa: F401 — music mode's stem splitter
 print(
     "seed-vc venv OK",
     "· torch", torch.__version__,

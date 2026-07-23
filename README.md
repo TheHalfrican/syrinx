@@ -17,7 +17,7 @@ Four small pieces on the D-Bus session bus, each doing one thing well:
 
 | Component | Language | Role |
 |-----------|----------|------|
-| `engine/` | Python | ML inference (Kokoro TTS, LuxTTS voice cloning, faster-whisper STT, Qwen3 personality LLM), pedalboard effects, plays audio via PipeWire, exposes `sh.syrinx.Engine1` on D-Bus. |
+| `engine/` | Python | ML inference — seven TTS engines (Kokoro, Qwen TTS, Qwen CustomVoice, LuxTTS, Chatterbox, Chatterbox Turbo, TADA), three voice-conversion engines (Chatterbox VC, Seed-VC, Vevo-Timbre), faster-whisper STT, Qwen3 personality LLM, Demucs stem separation, pedalboard effects. Plays audio via PipeWire; exposes `sh.syrinx.Engine1` on D-Bus. GPL / dependency-conflicting engines run as isolated-venv worker subprocesses. |
 | `app/`    | Rust + **Slint** | The main window — native GPU-rendered UI. |
 | `dictate/`| Rust | The dictation pill: a `wlr-layer-shell` overlay, PipeWire capture, `ydotool` paste. Fired by a Hyprland keybind. |
 | `mcp/`    | — | MCP server exposing `syrinx.speak` to agents (stub). |
@@ -54,26 +54,46 @@ bind = SUPER, D, exec, syrinx-dictate toggle
 
 ## Status
 
-Daily-drivable on a CPU-only machine; GPU cloning engines (Qwen-TTS,
-Chatterbox, TADA) are the next milestone.
+**Feature-complete against the original design** — every navigation
+destination is a real, working view. Daily-drivable on a CPU-only machine;
+a CUDA GPU makes the heavy engines fast rather than possible.
 
-Working today:
-
-- **Text-to-speech** with Kokoro preset voices (language-filtered) and
-  **voice cloning** with LuxTTS — CPU, faster than realtime, chunked at
-  sentence boundaries so long texts synthesize in bounded memory.
+- **Text-to-speech** across seven engines: Kokoro presets (language-filtered),
+  and zero-shot cloning with Qwen TTS (1.7B/0.6B), Qwen CustomVoice, LuxTTS
+  (CPU, faster than realtime), Chatterbox Multilingual, Chatterbox Turbo, and
+  TADA — every engine chunked at sentence boundaries so long texts synthesize
+  in bounded memory, with a VRAM policy that evicts deselected backends.
+- **Voice conversion** (the ⇄ Voice Converter): style-preserved dubbing — the
+  source's words, timing and delivery survive; only the timbre changes. Three
+  models (Chatterbox VC, Seed-VC, Vevo-Timbre), mic / system-tap / file
+  sources with auto-transcription, a saved-clip library with cached
+  transcripts, and **music mode**: Demucs isolates the vocals, Seed-VC's
+  f0-conditioned singing model converts them, and the result is remixed over
+  the original instrumental.
 - **Voice profiles**: create from a recording / upload / system-audio capture,
   full editing, avatars (circle or side-panel crop), portable export/import
   zips, per-profile engine pins, and a personality LLM (compose /
-  speak-in-character / rewrite).
-- **Persistent history** with a player (loop, live volume, drag-to-seek
+  speak-in-character / rewrite), plus a dedicated Voices view with sample
+  audition.
+- **Audio Library**: every generation, saved and searchable — full-text
+  search, type / model / voice filters, starred-only, user tags, and the
+  complete action set on every row.
+- **Persistent history** with a shared player (loop, live volume, drag-to-seek
   waveform), star / regenerate / export, and retroactive effects.
 - **Effects**: pedalboard chains — four built-in presets plus a full chain
   editor (reorder, bypass, per-parameter sliders, live preview, saved user
   presets).
 - **Transcription workspace**: mic / system-audio / file import with live
   streaming partials, LLM transcript refinement, and persistent text captures.
-- **Dictation pill** (`syrinx-dictate toggle`) with an optional `--refine`
-  cleanup pass.
-- **Models tab**: download and hot-switch STT / LLM / voice engines.
+- **Dictation pill** (`syrinx-dictate toggle`) with an LLM cleanup pass
+  toggleable from Settings (or `--refine`).
+- **Models tab**: download and hot-switch STT / LLM / voice engines, plus
+  weight management for the conversion models.
+- **Settings**: persisted theme, PipeWire capture-device pickers, dictation
+  refinement, live engine knobs, default export folder.
 - Multiple full-chrome UI themes (Matrix TTY, Win95, Frutiger Aero among them).
+
+The isolated conversion engines set up with one command each:
+`engine/setup-seedvc.sh` and `engine/setup-vevo.sh` (CUDA auto-detected;
+Seed-VC is GPL-3.0 and Vevo's weights are CC-BY-NC, so both live outside the
+main engine venv and their weights download on first use).
