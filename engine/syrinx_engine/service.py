@@ -233,7 +233,13 @@ class EngineInterface(ServiceInterface):
 
     @method()
     async def ListProfiles(self) -> "s":  # noqa: F821
-        return json.dumps([p.summary() for p in self._profiles.list()])
+        counts = self._profiles.sample_counts()
+        out = []
+        for p in self._profiles.list():
+            d = p.summary()
+            d["samples"] = counts.get(p.id, 0)
+            out.append(d)
+        return json.dumps(out)
 
     @method()
     async def GetProfile(self, profile_id: "s") -> "s":  # noqa: F821
@@ -389,6 +395,40 @@ class EngineInterface(ServiceInterface):
     @method()
     async def PlayHistoryAt(self, hid: "s", pct: "d") -> "u":  # noqa: F821
         return self._play_history(hid, pct)
+
+    @method()
+    async def PlaySample(self, sample_id: "s") -> "u":  # noqa: F821
+        """Audition a profile reference sample through the normal player."""
+        path = self._profiles.sample_path(sample_id)
+        if not path:
+            return 0
+        try:
+            pcm, rate = effects.load_wav(path)
+        except Exception:  # noqa: BLE001
+            log.exception("PlaySample %s: unreadable %s", sample_id, path)
+            return 0
+        gen_id = self._next_gen_id
+        self._next_gen_id += 1
+        bars = json.dumps(audio.envelope(pcm))
+        duration = len(pcm) / 4 / rate
+
+        async def run() -> None:
+            try:
+                self.SpeakStarted(gen_id)
+                await self._play(
+                    gen_id, pcm, rate,
+                    on_start=lambda: self.PlaybackInfo(gen_id, "", "Sample", duration, bars),
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                log.exception("PlaySample %s failed", sample_id)
+            finally:
+                self.SpeakEnded(gen_id)
+                self._tasks.pop(gen_id, None)
+
+        self._tasks[gen_id] = asyncio.create_task(run())
+        return gen_id
 
     def _play_history(self, hid: str, start_pct: float) -> int:
         item = self._history.get(hid)

@@ -107,6 +107,12 @@ class QwenBackend:
         self._prompts.clear()
         empty_device_cache()
 
+    def _prompt_path(self, key: str) -> Path:
+        # Clone prompts embed model activations, so they're SIZE-specific:
+        # a 1.7B prompt (hidden 2048) crashes 0.6B generation (hidden 1024)
+        # with "Sizes of tensors must match". One cache file per size.
+        return self._voices_dir / f"{key}_{self.model_size}.pt"
+
     # --- voices / cloning ----------------------------------------------
 
     def _index_path(self) -> Path:
@@ -143,7 +149,7 @@ class QwenBackend:
 
         import torch
 
-        torch.save(prompt, self._voices_dir / f"{voice_id}.pt")
+        torch.save(prompt, self._prompt_path(voice_id))
         index = self._read_index()
         index[voice_id] = name
         self._write_index(index)
@@ -154,14 +160,19 @@ class QwenBackend:
     def invalidate_profile(self, profile_id: str) -> None:
         """Forget a profile's cached clone prompt so it rebuilds from samples."""
         self._prompts.pop(profile_id, None)
-        (self._voices_dir / f"{profile_id}.pt").unlink(missing_ok=True)
+        (self._voices_dir / f"{profile_id}.pt").unlink(missing_ok=True)  # pre-size legacy
+        for size in MODELS:
+            (self._voices_dir / f"{profile_id}_{size}.pt").unlink(missing_ok=True)
         (self._voices_dir / f"{profile_id}_combined.wav").unlink(missing_ok=True)
 
     def _get_prompt(self, voice_id: str):
         if voice_id not in self._prompts:
             import torch
 
-            path = self._voices_dir / f"{voice_id}.pt"
+            path = self._prompt_path(voice_id)
+            if not path.exists():
+                # pre-size legacy file — created by whatever size was active then
+                path = self._voices_dir / f"{voice_id}.pt"
             if not path.exists():
                 raise ValueError(f"unknown cloned voice: {voice_id}")
             self._prompts[voice_id] = torch.load(
@@ -219,7 +230,9 @@ class QwenBackend:
             return self._prompts[key]
         import torch
 
-        cache = self._voices_dir / f"{key}.pt"
+        # sized path only — a pre-size legacy cache may have the wrong hidden
+        # dims, and rebuilding from samples costs seconds
+        cache = self._prompt_path(key)
         if cache.exists():
             self._prompts[key] = torch.load(cache, map_location=self.device, weights_only=False)
             return self._prompts[key]

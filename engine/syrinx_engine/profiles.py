@@ -356,6 +356,20 @@ class ProfileStore:
             )
         return Sample(sid, str(dest), reference_text)
 
+    def sample_counts(self) -> dict:
+        """profile_id -> number of reference samples (one query for ListProfiles)."""
+        with self._conn() as c:
+            return dict(
+                c.execute("SELECT profile_id, COUNT(*) FROM samples GROUP BY profile_id")
+            )
+
+    def sample_path(self, sample_id: str) -> str:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT audio_path FROM samples WHERE id=?", (sample_id,)
+            ).fetchone()
+            return row[0] if row else ""
+
     def set_sample_text(self, sample_id: str, reference_text: str) -> None:
         with self._conn() as c:
             c.execute(

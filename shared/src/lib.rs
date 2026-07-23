@@ -105,6 +105,9 @@ pub trait Engine {
     /// Replay a stored clip starting at `pct` (0..1); returns a generation id.
     fn play_history_at(&self, hid: &str, pct: f64) -> zbus::Result<u32>;
 
+    /// Audition a profile reference sample; returns a generation id (0 if not found).
+    fn play_sample(&self, sample_id: &str) -> zbus::Result<u32>;
+
     /// Pause the current playback.
     fn pause_playback(&self) -> zbus::Result<()>;
 
