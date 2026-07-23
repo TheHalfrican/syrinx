@@ -84,41 +84,56 @@ def _ensure_state(f0: bool):
 
 
 def _convert(rid, src_i16, src_rate, target_ad, target_name, f0, steps, auto_f0, semitone):
-    """Chunked source → converted float32 waveform + rate (models stay warm)."""
-    from seed_vc.api import inference
+    """Chunked source → converted float32 waveform + rate (models stay warm).
+
+    Drives the stream state's process_chunk directly instead of
+    api.inference(): the wrapper round-trips every chunk through int16 with a
+    plain astype, which WRAPS peaks past ±1.0 into full-scale spikes of the
+    opposite sign (the vocoder routinely overshoots on hot references). The
+    state's overlap buffer still does the crossfade between chunks; we keep
+    the floats and stay at the model's native rate (22050, or 44100 for f0).
+    """
+    import torch
 
     _ensure_state(f0)
+    parts = []
+    out_rate = int(_STATE.sr)
     chunk_len = max(1, int(CHUNK_SECS * src_rate))
     slices = [src_i16[i : i + chunk_len] for i in range(0, len(src_i16), chunk_len)]
-    parts = []
-    out_rate = src_rate
-    for i, piece in enumerate(slices):
-        last = i == len(slices) - 1
-        print(
-            f"seedvc-worker: chunk {i + 1}/{len(slices)} (steps={steps})",
-            file=sys.stderr, flush=True,
-        )
-        result = inference(
-            source=_audio_data(piece, src_rate),
-            target=target_ad,
-            new_target_name=target_name,  # target features cached by path
-            diffusion_steps=steps,
-            f0_condition=f0,
-            auto_f0_adjust=auto_f0,
-            semi_tone_shift=semitone,
-            fp16=False,
-            streaming=True,
-            stream_state=_STATE,
-            end_of_stream=last,
-        )
-        out_rate = int(result.sample_rate)
-        parts.append(np.asarray(result.samples, dtype=np.float32) / 32767.0)
+    # api.inference() is @torch.no_grad(); calling the state directly must
+    # carry the same context or autograd chokes on inference-mode weights
+    with torch.no_grad():
+        if target_name != _STATE.target_name:  # target features cached by path
+            _STATE.prepare_target(f0, target_ad, target_name)
+        for i, piece in enumerate(slices):
+            last = i == len(slices) - 1
+            print(
+                f"seedvc-worker: chunk {i + 1}/{len(slices)} (steps={steps})",
+                file=sys.stderr, flush=True,
+            )
+            chunk = _STATE.process_chunk(
+                source=_audio_data(piece, src_rate),
+                length_adjust=1.0,
+                diffusion_steps=steps,
+                inference_cfg_rate=0.7,
+                f0_condition=f0,
+                auto_f0_adjust=auto_f0,
+                semi_tone_shift=semitone,
+                fp16_flag=False,
+                end_of_stream=last,
+            )
+            parts.append(np.asarray(chunk, dtype=np.float32))
 
     audio = np.concatenate(parts) if len(parts) > 1 else parts[0]
     return audio.astype(np.float32), out_rate
 
 
 def _reply_raw(rid, audio: "np.ndarray", rate: int) -> dict:
+    # peak safety for every reply path: playback and the saved history clip
+    # hard-clip anything past ±1.0 (float32 all the way downstream)
+    peak = float(np.abs(audio).max()) or 1.0
+    if peak > 0.99:
+        audio = audio / peak * 0.99
     out = os.path.join(tempfile.gettempdir(), f"seedvc-{rid}.raw")
     audio.astype(np.float32).tofile(out)
     return {"id": rid, "ok": True, "raw": out, "rate": rate}
@@ -180,10 +195,7 @@ def _handle_music(req: dict) -> dict:
         converted = librosa.resample(converted, orig_sr=conv_rate, target_sr=demucs_sr)
     # align lengths (conversion can drift a few hundred samples) and sum
     n = min(len(converted), len(inst))
-    mix = converted[:n] + inst[:n]
-    peak = float(np.abs(mix).max()) or 1.0
-    if peak > 0.99:
-        mix = mix / peak * 0.99
+    mix = converted[:n] + inst[:n]  # _reply_raw peak-normalizes the sum
     return _reply_raw(rid, mix.astype(np.float32), demucs_sr)
 
 

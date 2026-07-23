@@ -117,6 +117,22 @@ class SpeechSynthesizer:
                 f"unknown VC engine {engine!r} "
                 f"(expected: {', '.join(sorted(VC_ENGINES))})"
             )
+        # one conversion engine on the card at a time: the ⇄ dropdown swaps
+        # engines freely (bake-offs), and a resident sibling worker (vevo
+        # holds ~10 GB) plus the TTS/STT/LLM stack OOMs the next engine's
+        # load. Evict before loading; the evicted one reloads on next use.
+        evicted = []
+        for name in [n for n in self._backends if n in VC_ENGINES and n != engine]:
+            be = self._backends.pop(name)
+            try:
+                unload = getattr(be, "unload", None)
+                if unload:
+                    unload()
+                evicted.append(name)
+            except Exception:  # noqa: BLE001
+                log.exception("unload %s failed", name)
+        if evicted:
+            log.info("evicted VC backends: %s", ", ".join(evicted))
         if engine not in self._backends:
             if engine == "seed_vc":
                 from .backends.seed_vc import SeedVCBackend

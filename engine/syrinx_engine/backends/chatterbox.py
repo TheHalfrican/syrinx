@@ -49,11 +49,18 @@ def combined_ref_wav(profile, voices_dir: Path) -> str:
 
     if not profile.samples:
         raise ValueError(f"profile {profile.id} has no samples to clone from")
-    parts, rate = [], 24_000
+    parts, rate = [], 0
     for s in profile.samples:
-        audio, rate = sf.read(s.audio_path, dtype="float32")
+        audio, sr = sf.read(s.audio_path, dtype="float32")
         if getattr(audio, "ndim", 1) > 1:
             audio = audio.mean(axis=1)  # to mono
+        rate = rate or sr
+        if sr != rate:
+            # samples can arrive at different rates (imports vs recordings) —
+            # concatenating raw would pitch-shift every mismatched sample
+            import librosa
+
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=rate)
         peak = float(np.abs(audio).max()) or 1.0
         parts.append(audio / peak * 0.95)
     sf.write(out, np.concatenate(parts).astype(np.float32), rate)
