@@ -34,9 +34,10 @@ Environment overrides (all optional):
 
 ## Long text is chunked, not scaled by hardware
 
-Cloning engines synthesize long text in sentence-boundary chunks (crossfaded
-at the joins) because flow-matching memory grows steeply with target duration —
-an unchunked 2-minute text once ballooned the LuxTTS worker to ~14 GB on a
+Every engine (LuxTTS, Qwen, Kokoro) synthesizes long text in sentence-boundary
+chunks (crossfaded at the joins) because synthesis memory grows steeply with
+target duration — flow-matching in LuxTTS, autoregressive decode in Qwen; an
+unchunked 2-minute text once ballooned the LuxTTS worker to ~14 GB on a
 15 GB box. Chunking caps peak memory regardless of RAM/VRAM, so the default
 stays the same on every machine.
 

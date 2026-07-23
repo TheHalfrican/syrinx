@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from . import VoiceInfo, detect_device
+from .. import chunking
 
 log = logging.getLogger("syrinx.engine.tts.qwen")
 
@@ -40,6 +41,17 @@ MODELS = {
 def _slug(name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return s or "voice"
+
+
+def _as_float32(audio) -> np.ndarray:
+    try:
+        import torch
+
+        if isinstance(audio, torch.Tensor):
+            audio = audio.detach().cpu().numpy()
+    except Exception:  # noqa: BLE001
+        pass
+    return np.asarray(audio, dtype=np.float32).reshape(-1)
 
 
 class QwenBackend:
@@ -153,26 +165,39 @@ class QwenBackend:
 
     # --- synthesis ------------------------------------------------------
 
+    async def _generate_chunked(self, text: str, prompt, instruct) -> tuple[bytes, int]:
+        # Long text generates per sentence-boundary chunk: the autoregressive
+        # decode is bounded per chunk (VRAM and drift both grow with sequence
+        # length), then chunks are crossfaded — same pattern as LuxTTS.
+        chunks = chunking.split_text_into_chunks(text, chunking.max_chunk_chars())
+
+        def _run(chunk_text: str) -> tuple[np.ndarray, int]:
+            wavs, sample_rate = self._model.generate_voice_clone(
+                text=chunk_text,
+                voice_clone_prompt=prompt,
+                language="english",
+                instruct=instruct,
+            )
+            return _as_float32(wavs[0]), int(sample_rate)
+
+        if len(chunks) <= 1:
+            audio, rate = await asyncio.to_thread(_run, text)
+            return audio.tobytes(), rate
+
+        log.info("qwen: %d chars -> %d chunks", len(text), len(chunks))
+        parts: list[np.ndarray] = []
+        rate = 24_000
+        for i, chunk in enumerate(chunks, 1):
+            log.info("qwen chunk %d/%d (%d chars)", i, len(chunks), len(chunk))
+            audio, rate = await asyncio.to_thread(_run, chunk)
+            parts.append(audio)
+        return chunking.crossfade_concat(parts, rate).tobytes(), rate
+
     async def synthesize(self, text: str, voice_id: str) -> tuple[bytes, int]:
         await self.load()
         prompt = self._get_prompt(voice_id)
-
-        def _run() -> tuple[bytes, int]:
-            wavs, sample_rate = self._model.generate_voice_clone(
-                text=text, voice_clone_prompt=prompt, language="english", instruct=None
-            )
-            audio = wavs[0]
-            try:
-                import torch
-
-                if isinstance(audio, torch.Tensor):
-                    audio = audio.detach().cpu().numpy()
-            except Exception:  # noqa: BLE001
-                pass
-            return np.asarray(audio).astype(np.float32).tobytes(), int(sample_rate)
-
         log.info("synthesize [qwen %s] (%s): %r", self.model_size, voice_id, text[:60])
-        return await asyncio.to_thread(_run)
+        return await self._generate_chunked(text, prompt, None)
 
     # --- profile-based cloning -----------------------------------------
 
@@ -215,24 +240,7 @@ class QwenBackend:
 
     async def synthesize_profile(self, profile, text: str, instruct: str = "") -> tuple[bytes, int]:
         await self.load()
-
-        def _run() -> tuple[bytes, int]:
-            prompt = self._profile_prompt(profile)
-            wavs, sample_rate = self._model.generate_voice_clone(
-                text=text,
-                voice_clone_prompt=prompt,
-                language="english",
-                instruct=instruct or None,
-            )
-            audio = wavs[0]
-            try:
-                import torch
-
-                if isinstance(audio, torch.Tensor):
-                    audio = audio.detach().cpu().numpy()
-            except Exception:  # noqa: BLE001
-                pass
-            return np.asarray(audio).astype(np.float32).tobytes(), int(sample_rate)
-
+        # prompt build can hit disk / run the encoder — keep it off the loop
+        prompt = await asyncio.to_thread(self._profile_prompt, profile)
         log.info("synthesize_profile [qwen %s] (%s): %r", self.model_size, profile.id, text[:60])
-        return await asyncio.to_thread(_run)
+        return await self._generate_chunked(text, prompt, instruct or None)

@@ -5,8 +5,8 @@ natural boundaries (sentence end → clause → whitespace → hard cut, never
 inside a ``[tag]``), synthesized per-chunk, and joined with a short
 crossfade. Caps the synthesis sequence length — LuxTTS's flow-matching
 memory grows steeply with target duration (an unchunked 2-minute text
-OOM-killed the worker on the 15 GB dev box) — and the same helpers apply
-to the Chatterbox/Qwen backends when those land.
+OOM-killed the worker on the 15 GB dev box). Wired into every backend
+(LuxTTS, Qwen, Kokoro); do the same in Chatterbox/TADA when those land.
 
 Short text (≤ max chunk chars) is left untouched by the splitter, so
 callers get a zero-overhead single-shot fast path.
