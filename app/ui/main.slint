@@ -593,6 +593,9 @@ export component AppWindow inherits Window {
     in property <[string]> vc-voice-names: []; // cloned profiles with samples
     in-out property <int> vc-voice-index: 0;
     in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)
+    in property <[HistItem]> vc-history;       // conversion results (right rail)
+    in property <string> vc-transcript;        // auto-transcribed source words
+    in property <bool> vc-transcribing;
     in property <string> vc-armed-id: "";      // saved clip armed as source ("" = scratch/import)
     in property <bool> vc-armed-saved: false;  // hides "Save clip" when already stored
     in property <string> vc-audition-id: "";   // clip id or "scratch" while auditioning
@@ -793,7 +796,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout { alignment: center; NavIcon { glyph: "☰"; active: tab == "stt"; clicked => { tab = "stt"; }
                         hover-changed(on, y) => { nav-tip = on ? "Transcription" : ""; nav-tip-y = y; } } }
                     HorizontalLayout { alignment: center; NavIcon { glyph: "⇄"; active: tab == "vc"; clicked => { tab = "vc"; root.vc-open(); }
-                        hover-changed(on, y) => { nav-tip = on ? "Voice Changer" : ""; nav-tip-y = y; } } }
+                        hover-changed(on, y) => { nav-tip = on ? "Voice Converter" : ""; nav-tip-y = y; } } }
                     HorizontalLayout { alignment: center; NavIcon { glyph: "▤"; active: tab == "lib"; clicked => { tab = "lib"; }
                         hover-changed(on, y) => { nav-tip = on ? "Library" : ""; nav-tip-y = y; } } }
                     HorizontalLayout { alignment: center; NavIcon { glyph: "◈"; active: tab == "models"; clicked => { tab = "models"; }
@@ -817,7 +820,7 @@ export component AppWindow inherits Window {
                                 text: tab == "tts" ? "Text to Speech"
                                     : tab == "stt" ? "Transcription"
                                     : tab == "voices" ? "Voices"
-                                    : tab == "vc" ? "Voice Changer"
+                                    : tab == "vc" ? "Voice Converter"
                                     : (tab == "models" ? "Models" : "Coming soon");
                                 font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg;
                             }
@@ -1728,18 +1731,93 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 LabeledInput {
                                     label: "CLIP NAME"; placeholder: "e.g. Interview excerpt";
-                                    value <=> vc-clip-name; horizontal-stretch: 1;
+                                    value <=> vc-clip-name; horizontal-stretch: 1; vertical-stretch: 0;
                                 }
                                 VerticalLayout {
                                     alignment: end;
                                     TBtn { label: "▤ Save clip"; clicked => { if (!vc-recording) { root.vc-save-clip(); } } }
                                 }
                             }
+                            // auto-transcript of the armed source — read-only,
+                            // selectable, right-click copy (capture-card pattern).
+                            // This box takes the column's spare height.
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: "SOURCE TRANSCRIPT"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; vertical-alignment: center; }
+                                Rectangle {}
+                                if vc-transcribing : Text {
+                                    text: "transcribing…"; font-size: 10.5px; font-family: Theme.mono;
+                                    color: Theme.dim; vertical-alignment: center;
+                                }
+                            }
+                            Rectangle {
+                                vertical-stretch: 1; min-height: 64px;
+                                property <length> ctx-x;
+                                property <length> ctx-y;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad;
+                                background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                vtta := TouchArea {
+                                    pointer-event(e) => {
+                                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                            ctx-x = vtta.mouse-x;
+                                            ctx-y = vtta.mouse-y;
+                                            vtmenu.show();
+                                        }
+                                    }
+                                }
+                                if vc-transcript == "" && !vc-transcribing : Text {
+                                    x: 12px; y: 8px; width: parent.width - 24px;
+                                    text: vc-has-source ? "No speech detected in this source."
+                                        : "The source's words appear here — recorded, imported or picked from the rail.";
+                                    font-size: 11.5px; color: Theme.dim; opacity: 0.6;
+                                    wrap: word-wrap; font-family: Theme.font;
+                                }
+                                vtsv := ScrollView {
+                                    x: 12px; y: 8px;
+                                    width: parent.width - 24px; height: parent.height - 16px;
+                                    viewport-width: self.visible-width;
+                                    viewport-height: max(self.visible-height, vtti.preferred-height);
+                                    vtti := TextInput {
+                                        page-height: vtsv.visible-height;
+                                        text: vc-transcript;
+                                        read-only: true;
+                                        wrap: word-wrap; single-line: false;
+                                        font-size: 12px; color: Theme.fg; font-family: Theme.font;
+                                        // drag-select past the edge scrolls to follow
+                                        cursor-position-changed(cpos) => {
+                                            if (cpos.y + vtsv.viewport-y < 0px) {
+                                                vtsv.viewport-y = min(0px, max(vtsv.visible-height - self.height, -cpos.y));
+                                            } else if (cpos.y + vtsv.viewport-y > vtsv.visible-height - 20px) {
+                                                vtsv.viewport-y = min(0px, max(vtsv.visible-height - self.height, vtsv.visible-height - cpos.y - 20px));
+                                            }
+                                        }
+                                    }
+                                }
+                                vtmenu := PopupWindow {
+                                    x: parent.ctx-x; y: parent.ctx-y;
+                                    width: 150px; height: 92px;
+                                    close-policy: close-on-click-outside;
+                                    Rectangle {
+                                        background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                        border-width: Theme.name == "win95" ? 0px : 1px;
+                                        border-color: Theme.brd; border-radius: Theme.rad;
+                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                        VerticalLayout {
+                                            padding: 3px;
+                                            RowMenuItem { label: "Copy"; chosen => { vtti.copy(); vtmenu.close(); } }
+                                            RowMenuItem { label: "Copy all"; chosen => { vtti.select-all(); vtti.copy(); vtmenu.close(); } }
+                                            RowMenuItem { label: "Select all"; chosen => { vtti.select-all(); vtmenu.close(); } }
+                                        }
+                                    }
+                                }
+                            }
                             // 2 — target voice + result name + convert
                             Text { text: "2 · TARGET VOICE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
                             LabeledInput {
                                 label: "RESULT NAME (optional)"; placeholder: "Type conversion name here…";
-                                value <=> vc-result-name;
+                                value <=> vc-result-name; vertical-stretch: 0;
                             }
                             HorizontalLayout {
                                 spacing: 8px;
@@ -1780,10 +1858,59 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Text {
-                                text: "The conversion keeps the original words, timing and delivery — only the voice changes. The result plays when ready and lands in History, where it can be starred, exported or deleted.";
+                                text: "The conversion keeps the original words, timing and delivery — only the voice changes. Results play when ready and land in the rail here and in History (labeled ⇄ VC).";
                                 font-size: 11px; color: Theme.dim; wrap: word-wrap;
                             }
-                            Rectangle {}
+                        }
+                        // conversion results rail — the same history rows,
+                        // filtered to VC engines (labeled "⇄ VC" in the TTS list)
+                        VerticalLayout {
+                            width: 210px; spacing: 10px;
+                            Text { text: "CONVERSIONS"; font-size: 12px; font-weight: 700; color: Theme.dim; }
+                            ScrollView {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    for h in vc-history : Rectangle {
+                                        // fixed height so the ScrollView scrolls
+                                        height: 84px;
+                                        border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                        border-radius: Theme.rad; background: Theme.card-bg;
+                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                        VerticalLayout {
+                                            padding: 10px; spacing: 4px;
+                                            Text { text: h.text; font-size: 11.5px; font-weight: 700; color: Theme.fg; overflow: elide; }
+                                            Text { text: h.voice + " · " + h.meta; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; overflow: elide; }
+                                            HorizontalLayout {
+                                                spacing: 4px;
+                                                Rectangle {
+                                                    width: 22px; height: 18px; border-radius: Theme.rad;
+                                                    background: vhp.has-hover ? Theme.acc-soft : transparent;
+                                                    vhp := TouchArea { clicked => { root.play-hist(h.id); } }
+                                                    Text { text: "▶"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                                Rectangle {
+                                                    width: 22px; height: 18px; border-radius: Theme.rad;
+                                                    background: vhe.has-hover ? Theme.acc-soft : transparent;
+                                                    vhe := TouchArea { clicked => { root.export-audio(h.id); } }
+                                                    Text { text: "⇩"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                                Rectangle {
+                                                    width: 22px; height: 18px; border-radius: Theme.rad;
+                                                    background: vhd.has-hover ? Theme.acc-soft : transparent;
+                                                    vhd := TouchArea { clicked => { root.delete-hist(h.id); } }
+                                                    Text { text: "✕"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                                Rectangle {}
+                                            }
+                                        }
+                                    }
+                                    if vc-history.length == 0 : Text {
+                                        text: "— no conversions yet —"; font-size: 10.5px; font-family: Theme.mono;
+                                        color: Theme.dim; horizontal-alignment: center;
+                                    }
+                                }
+                            }
                         }
                     }
 

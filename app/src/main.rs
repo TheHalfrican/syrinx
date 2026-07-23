@@ -953,6 +953,11 @@ fn fmt_dur(d: f64) -> String {
 }
 
 /// Build the history model from the engine's ListHistory JSON (newest first).
+/// Engines whose history rows are conversions, not TTS generations.
+fn is_vc_engine(engine: &str) -> bool {
+    matches!(engine, "chatterbox_vc" | "seed_vc" | "vevo_timbre" | "vevo2")
+}
+
 fn build_history(json: &str) -> Vec<HistItem> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
     arr.iter()
@@ -965,7 +970,11 @@ fn build_history(json: &str) -> Vec<HistItem> {
             let engine = get("engine");
             let lang = get("language");
             let dur = h.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let meta = if engine.is_empty() {
+            // "⇄ VC" labels conversions in the shared list; set_history_model
+            // also keys the vc-tab rail off this prefix
+            let meta = if is_vc_engine(engine) {
+                format!("⇄ VC · {} · {}", fmt_dur(dur), lang)
+            } else if engine.is_empty() {
                 format!("{} · {}", fmt_dur(dur), lang)
             } else {
                 format!("{} · {} · {}", engine, fmt_dur(dur), lang)
@@ -1345,6 +1354,22 @@ fn set_model_progress(ui: &slint::Weak<AppWindow>, id: String, pct: f32, downloa
 
 /// Replace the history model's contents in place (keeps the shared VecModel).
 fn set_history_model(ui: &AppWindow, items: Vec<HistItem>) {
+    // the ⇄ tab's CONVERSIONS rail is the same data filtered to VC rows,
+    // derived here so every history refresh keeps both models in sync
+    let vc: Vec<HistItem> = items
+        .iter()
+        .filter(|h| h.meta.starts_with("⇄ VC"))
+        .map(|h| {
+            let mut h = h.clone();
+            h.meta = h.meta.strip_prefix("⇄ VC · ").unwrap_or(&h.meta).into();
+            h
+        })
+        .collect();
+    if let Some(vm) = ui.get_vc_history().as_any().downcast_ref::<VecModel<HistItem>>() {
+        vm.set_vec(vc);
+    } else {
+        ui.set_vc_history(ModelRc::from(Rc::new(VecModel::from(vc))));
+    }
     if let Some(vm) = ui.get_history().as_any().downcast_ref::<VecModel<HistItem>>() {
         vm.set_vec(items);
     } else {
@@ -1602,6 +1627,7 @@ async fn worker(
     let mut vc_clips_data: Vec<(String, String, String)> = Vec::new(); // (id, name, path)
     let mut vc_audition_gen: u32 = 0;               // audition playback gen (0 = none)
     let mut vc_audition_id = String::new();         // clip id or "scratch" being played
+    let mut pending_vc_tr: u32 = 0;                 // source auto-transcription req id
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -1658,12 +1684,22 @@ async fn worker(
                     if a.req_id == pending_tr && pending_tr != 0 {
                         let partial = a.partial.to_string();
                         ui.upgrade_in_event_loop(move |ui| ui.set_tr_text(partial.into())).ok();
+                    } else if a.req_id == pending_vc_tr && pending_vc_tr != 0 {
+                        let partial = a.partial.to_string();
+                        ui.upgrade_in_event_loop(move |ui| ui.set_vc_transcript(partial.into())).ok();
                     }
                 }
             }
             Some(sig) = tres.next() => {
                 if let Ok(a) = sig.args() {
-                    if a.req_id == pending_tr && pending_tr != 0 {
+                    if a.req_id == pending_vc_tr && pending_vc_tr != 0 && a.req_id != pending_tr {
+                        pending_vc_tr = 0;
+                        let text = a.text.to_string();
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_vc_transcribing(false);
+                            ui.set_vc_transcript(text.into());
+                        }).ok();
+                    } else if a.req_id == pending_tr && pending_tr != 0 {
                         pending_tr = 0;
                         let text = a.text.to_string();
                         ui.upgrade_in_event_loop(move |ui| {
@@ -1852,6 +1888,16 @@ async fn worker(
                                 ui.set_vc_armed_saved(false);
                                 ui.set_vc_status("".into());
                             }).ok();
+                            match proxy.transcribe_file(&vc_wav).await {
+                                Ok(rid) => {
+                                    pending_vc_tr = rid;
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_vc_transcribing(true);
+                                        ui.set_vc_transcript("".into());
+                                    }).ok();
+                                }
+                                Err(e) => tracing::error!("vc transcribe failed: {e}"),
+                            }
                         }
                     } else {
                         let e = vc_elapsed;
@@ -2693,6 +2739,16 @@ async fn worker(
                                 ui.set_vc_armed_saved(false);
                                 ui.set_vc_status("".into());
                             }).ok();
+                            match proxy.transcribe_file(&vc_wav).await {
+                                Ok(rid) => {
+                                    pending_vc_tr = rid;
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_vc_transcribing(true);
+                                        ui.set_vc_transcript("".into());
+                                    }).ok();
+                                }
+                                Err(e) => tracing::error!("vc transcribe failed: {e}"),
+                            }
                         }
                     } else {
                         let device = if system { default_monitor().await } else { None };
@@ -2705,12 +2761,15 @@ async fn worker(
                                 Ok(child) => {
                                     vc_rec = Some(child);
                                     vc_elapsed = 0;
+                                    pending_vc_tr = 0;  // a stale transcription no longer applies
                                     rec_interval.reset();  // first tick a full second out
                                     let mode = if system { "system" } else { "mic" };
                                     ui.upgrade_in_event_loop(move |ui| {
                                         ui.set_vc_has_source(false);
                                         ui.set_vc_source_label("".into());
                                         ui.set_vc_error("".into());
+                                        ui.set_vc_transcript("".into());
+                                        ui.set_vc_transcribing(false);
                                         ui.set_vc_rec_mode(mode.into());
                                         ui.set_vc_recording(true);
                                         ui.set_vc_status("● recording 0:00 / 3:00".into());
@@ -2728,7 +2787,8 @@ async fn worker(
                         .await
                     {
                         let name = handle.file_name();
-                        vc_source = Some(handle.path().to_string_lossy().to_string());
+                        let path = handle.path().to_string_lossy().to_string();
+                        vc_source = Some(path.clone());
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_vc_has_source(true);
                             ui.set_vc_source_label(name.into());
@@ -2737,6 +2797,16 @@ async fn worker(
                             ui.set_vc_error("".into());
                             ui.set_vc_status("".into());
                         }).ok();
+                        match proxy.transcribe_file(&path).await {
+                            Ok(rid) => {
+                                pending_vc_tr = rid;
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_vc_transcribing(true);
+                                    ui.set_vc_transcript("".into());
+                                }).ok();
+                            }
+                            Err(e) => tracing::error!("vc transcribe failed: {e}"),
+                        }
                     }
                 }
                 Some(Cmd::VcConvert { index, label }) => {
@@ -2823,7 +2893,7 @@ async fn worker(
                     if let Some((cid, cname, cpath)) =
                         vc_clips_data.iter().find(|(cid, _, _)| *cid == id).cloned()
                     {
-                        vc_source = Some(cpath);
+                        vc_source = Some(cpath.clone());
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_vc_has_source(true);
                             ui.set_vc_source_label(cname.into());
@@ -2832,6 +2902,16 @@ async fn worker(
                             ui.set_vc_error("".into());
                             ui.set_vc_status("".into());
                         }).ok();
+                        match proxy.transcribe_file(&cpath).await {
+                            Ok(rid) => {
+                                pending_vc_tr = rid;
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_vc_transcribing(true);
+                                    ui.set_vc_transcript("".into());
+                                }).ok();
+                            }
+                            Err(e) => tracing::error!("vc transcribe failed: {e}"),
+                        }
                     }
                 }
                 Some(Cmd::VcAudition { id }) => {
