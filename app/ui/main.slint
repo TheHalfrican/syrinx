@@ -566,6 +566,7 @@ export component AppWindow inherits Window {
     in property <[string]> composer-effects: ["No effects"];
     in-out property <int> composer-effect-index: 0;
     in-out property <int> composer-style-index: 0;  // delivery direction (index into app-side STYLES)
+    in property <bool> style-supported: false;      // selected voice's engine honors instructs
     callback pick-style(int);
     in-out property <bool> persona-on: false;   // "speak in character" toggle
     in-out property <string> gen-error: "";     // last generation failure (cleared on Generate)
@@ -1029,8 +1030,9 @@ export component AppWindow inherits Window {
                                             current-index <=> composer-engine-index;
                                             selected(i) => { root.pick-engine(i); }
                                         }
-                                        // delivery direction — labels must match STYLES in main.rs
-                                        ThemedDropdown {
+                                        // delivery direction — labels must match STYLES in main.rs;
+                                        // hidden when the voice's engine ignores instructs
+                                        if style-supported : ThemedDropdown {
                                             up: true; horizontal-stretch: 1;
                                             model: ["No direction", "Angry", "Sad", "Happy", "Excited", "Fearful", "Whisper", "Serious"];
                                             current-index <=> composer-style-index;

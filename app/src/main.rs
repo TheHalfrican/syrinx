@@ -1249,9 +1249,13 @@ fn update_composer_langs(
     let labels: Vec<SharedString> = pairs.iter().map(|(l, _)| SharedString::from(*l)).collect();
     let codes: Vec<&'static str> = pairs.iter().map(|(_, c)| *c).collect();
     let idx = codes.iter().position(|c| *c == current_code).unwrap_or(0) as i32;
+    // only the qwen engines honor delivery instructs — hide the style
+    // dropdown for the rest instead of offering a knob that does nothing
+    let styled = matches!(engine, "qwen" | "qwen_custom_voice");
     ui.upgrade_in_event_loop(move |ui| {
         ui.set_composer_langs(ModelRc::from(Rc::new(VecModel::from(labels))));
         ui.set_composer_lang_index(idx);
+        ui.set_style_supported(styled);
     })
     .ok();
     codes
