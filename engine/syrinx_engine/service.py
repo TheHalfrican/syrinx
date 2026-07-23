@@ -50,7 +50,7 @@ class EngineInterface(ServiceInterface):
         if (s := self._models.active_spec("stt")):
             self._stt.set_model(s.repos[0])
         if (s := self._models.active_spec("voice")):
-            self._tts.set_clone_engine(s.engine)
+            self._tts.set_voice_engine(s.engine, s.size)
         self._model_loaded = False
         self._next_gen_id = 1
         self._next_llm_id = 1
@@ -371,8 +371,9 @@ class EngineInterface(ServiceInterface):
         elif s and category == "stt":
             self._stt.set_model(s.repos[0])
         elif s and category == "voice":
-            # cloned profiles without a pinned default_engine follow this
-            self._tts.set_clone_engine(s.engine)
+            # cloned profiles without a pinned default_engine follow this;
+            # extra preset engines (CustomVoice) list their voices instead
+            self._tts.set_voice_engine(s.engine, s.size)
         return category
 
     # --- generation history --------------------------------------------

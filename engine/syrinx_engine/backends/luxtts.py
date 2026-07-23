@@ -54,6 +54,15 @@ class LuxTTSBackend:
     async def load(self) -> None:
         await self._ensure_worker()
 
+    def unload(self) -> None:
+        """Stop the worker (it exits when stdin closes), freeing its memory."""
+        if self._proc is not None:
+            try:
+                self._proc.stdin.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._proc = None
+
     async def list_voices(self) -> list:
         return []  # cloning-only, no presets
 
