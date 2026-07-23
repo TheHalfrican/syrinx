@@ -38,8 +38,23 @@ def detect_device() -> str:
     return "cpu"
 
 
-def make_backend(name: str | None = None):
-    """Instantiate the configured TTS backend (lazy imports keep deps optional)."""
+def empty_device_cache() -> None:
+    """Return freed model VRAM to the driver after an unload."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def make_backend(name: str | None = None, size: str = ""):
+    """Instantiate the configured TTS backend (lazy imports keep deps optional).
+
+    *size* picks the model variant for engines that have them (qwen 1.7B/0.6B,
+    qwen_custom_voice 1.7B/0.6B, tada 1B/3B); "" = the backend's default.
+    """
     name = (name or os.environ.get("SYRINX_TTS_ENGINE", "kokoro")).lower()
     if name == "kokoro":
         from .kokoro import KokoroBackend
@@ -48,9 +63,29 @@ def make_backend(name: str | None = None):
     if name == "qwen":
         from .qwen import QwenBackend
 
-        return QwenBackend()
+        return QwenBackend(size)
     if name == "luxtts":
         from .luxtts import LuxTTSBackend
 
         return LuxTTSBackend()
-    raise ValueError(f"Unknown SYRINX_TTS_ENGINE={name!r} (expected: kokoro | qwen | luxtts)")
+    if name == "chatterbox":
+        from .chatterbox import ChatterboxBackend
+
+        return ChatterboxBackend()
+    if name == "chatterbox_turbo":
+        from .chatterbox import ChatterboxTurboBackend
+
+        return ChatterboxTurboBackend()
+    if name == "qwen_custom_voice":
+        from .qwen import QwenCustomVoiceBackend
+
+        return QwenCustomVoiceBackend(size)
+    if name == "tada":
+        from .tada import TadaBackend
+
+        return TadaBackend(size)
+    raise ValueError(
+        f"Unknown SYRINX_TTS_ENGINE={name!r} "
+        "(expected: kokoro | qwen | qwen_custom_voice | luxtts | "
+        "chatterbox | chatterbox_turbo | tada)"
+    )

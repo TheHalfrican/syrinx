@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import VoiceInfo, detect_device
+from . import VoiceInfo, detect_device, empty_device_cache
 from .. import chunking
 
 log = logging.getLogger("syrinx.engine.tts.qwen")
@@ -57,9 +57,9 @@ def _as_float32(audio) -> np.ndarray:
 class QwenBackend:
     supports_cloning = True
 
-    def __init__(self) -> None:
+    def __init__(self, size: str = "") -> None:
         self.device = detect_device()
-        self.model_size = os.environ.get("SYRINX_MODEL", "1.7B")
+        self.model_size = size or os.environ.get("SYRINX_MODEL", "1.7B")
         if self.model_size not in MODELS:
             self.model_size = "1.7B"
         self._model = None
@@ -100,6 +100,12 @@ class QwenBackend:
                 model_path, torch_dtype=torch.float32, low_cpu_mem_usage=False
             )
         log.info("Qwen3-TTS %s loaded", self.model_size)
+
+    def unload(self) -> None:
+        """Free the model + on-device prompt cache (prompts reload from disk)."""
+        self._model = None
+        self._prompts.clear()
+        empty_device_cache()
 
     # --- voices / cloning ----------------------------------------------
 
@@ -169,8 +175,6 @@ class QwenBackend:
         # Long text generates per sentence-boundary chunk: the autoregressive
         # decode is bounded per chunk (VRAM and drift both grow with sequence
         # length), then chunks are crossfaded — same pattern as LuxTTS.
-        chunks = chunking.split_text_into_chunks(text, chunking.max_chunk_chars())
-
         def _run(chunk_text: str) -> tuple[np.ndarray, int]:
             wavs, sample_rate = self._model.generate_voice_clone(
                 text=chunk_text,
@@ -180,18 +184,7 @@ class QwenBackend:
             )
             return _as_float32(wavs[0]), int(sample_rate)
 
-        if len(chunks) <= 1:
-            audio, rate = await asyncio.to_thread(_run, text)
-            return audio.tobytes(), rate
-
-        log.info("qwen: %d chars -> %d chunks", len(text), len(chunks))
-        parts: list[np.ndarray] = []
-        rate = 24_000
-        for i, chunk in enumerate(chunks, 1):
-            log.info("qwen chunk %d/%d (%d chars)", i, len(chunks), len(chunk))
-            audio, rate = await asyncio.to_thread(_run, chunk)
-            parts.append(audio)
-        return chunking.crossfade_concat(parts, rate).tobytes(), rate
+        return await chunking.synthesize_chunked(_run, text, log=log, label="qwen")
 
     async def synthesize(self, text: str, voice_id: str) -> tuple[bytes, int]:
         await self.load()
@@ -244,3 +237,126 @@ class QwenBackend:
         prompt = await asyncio.to_thread(self._profile_prompt, profile)
         log.info("synthesize_profile [qwen %s] (%s): %r", self.model_size, profile.id, text[:60])
         return await self._generate_chunked(text, prompt, instruct or None)
+
+
+# --- Qwen CustomVoice — preset speakers + instruct ------------------------
+
+# (speaker_id, display name) — the 9 built-in CustomVoice speakers.
+CV_VOICES = [
+    ("Vivian", "Vivian (zh ♀)"),
+    ("Serena", "Serena (zh ♀)"),
+    ("Uncle_Fu", "Uncle Fu (zh ♂)"),
+    ("Dylan", "Dylan (zh ♂)"),
+    ("Eric", "Eric (zh ♂)"),
+    ("Ryan", "Ryan (en ♂)"),
+    ("Aiden", "Aiden (en ♂)"),
+    ("Ono_Anna", "Ono Anna (ja ♀)"),
+    ("Sohee", "Sohee (ko ♀)"),
+]
+CV_DEFAULT_SPEAKER = "Ryan"
+CV_MODELS = {
+    "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "0.6B": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+}
+# generate_custom_voice wants a language NAME ("English"), not a code.
+CV_LANGUAGES = {
+    "zh": "Chinese", "en": "English", "ja": "Japanese", "ko": "Korean",
+    "de": "German", "fr": "French", "ru": "Russian", "pt": "Portuguese",
+    "es": "Spanish", "it": "Italian",
+}
+
+
+class QwenCustomVoiceBackend:
+    """Preset-speaker TTS with natural-language style control (instruct).
+
+    Same qwen_tts library as QwenBackend, different checkpoint and entry
+    point (generate_custom_voice). No cloning — 9 fixed speakers.
+    """
+
+    supports_cloning = False
+
+    def __init__(self, size: str = "") -> None:
+        self.device = detect_device()
+        self.model_size = size or os.environ.get("SYRINX_QWEN_CV_SIZE", "1.7B")
+        if self.model_size not in CV_MODELS:
+            self.model_size = "1.7B"
+        self._model = None
+        self._load_lock = asyncio.Lock()
+
+    async def load(self) -> None:
+        if self._model is None:
+            async with self._load_lock:
+                if self._model is None:
+                    await asyncio.to_thread(self._load_sync)
+
+    def _load_sync(self) -> None:
+        import torch
+        from qwen_tts import Qwen3TTSModel
+
+        path = CV_MODELS[self.model_size]
+        if self.device in ("cuda", "rocm"):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                torch.backends.cuda.enable_flash_sdp(True)
+            except Exception:  # noqa: BLE001
+                pass
+            log.info("loading Qwen CustomVoice %s on %s (bf16)...", self.model_size, self.device)
+            self._model = Qwen3TTSModel.from_pretrained(
+                path, device_map=self.device, torch_dtype=torch.bfloat16
+            )
+        else:
+            log.info("loading Qwen CustomVoice %s on cpu (float32 — slow)...", self.model_size)
+            self._model = Qwen3TTSModel.from_pretrained(
+                path, torch_dtype=torch.float32, low_cpu_mem_usage=False
+            )
+        log.info("Qwen CustomVoice %s loaded", self.model_size)
+
+    def unload(self) -> None:
+        self._model = None
+        empty_device_cache()
+
+    async def list_voices(self) -> list[VoiceInfo]:
+        return [VoiceInfo(sid, name) for sid, name in CV_VOICES]
+
+    def _gen(self, speaker: str, language: str, instruct):
+        lang = CV_LANGUAGES.get(language, "Auto")
+
+        def _run(chunk_text: str) -> tuple[np.ndarray, int]:
+            kwargs = {"text": chunk_text, "language": lang, "speaker": speaker}
+            if instruct:
+                kwargs["instruct"] = instruct
+            wavs, rate = self._model.generate_custom_voice(**kwargs)
+            return _as_float32(wavs[0]), int(rate)
+
+        return _run
+
+    async def synthesize(self, text: str, voice_id: str) -> tuple[bytes, int]:
+        await self.load()
+        known = {sid for sid, _ in CV_VOICES}
+        speaker = voice_id if voice_id in known else CV_DEFAULT_SPEAKER
+        log.info("synthesize [qwen_cv %s] (%s): %r", self.model_size, speaker, text[:60])
+        # no language context on the raw preset path — the model auto-detects
+        return await chunking.synthesize_chunked(
+            self._gen(speaker, "", None), text, log=log, label="qwen_cv"
+        )
+
+    async def synthesize_profile(self, profile, text: str, instruct: str = "") -> tuple[bytes, int]:
+        # Preset profiles carry the speaker in preset_voice_id; a cloned
+        # profile mistakenly pinned here falls back to the default speaker.
+        await self.load()
+        known = {sid for sid, _ in CV_VOICES}
+        speaker = getattr(profile, "preset_voice_id", "") or CV_DEFAULT_SPEAKER
+        if speaker not in known:
+            speaker = CV_DEFAULT_SPEAKER
+        language = getattr(profile, "language", "en") or "en"
+        log.info(
+            "synthesize_profile [qwen_cv %s] (%s→%s): %r",
+            self.model_size, profile.id, speaker, text[:60],
+        )
+        return await chunking.synthesize_chunked(
+            self._gen(speaker, language, instruct or None), text, log=log, label="qwen_cv"
+        )
+
+    def invalidate_profile(self, profile_id: str) -> None:
+        pass  # nothing cached per profile

@@ -12,6 +12,7 @@ Short text (≤ max chunk chars) is left untouched by the splitter, so
 callers get a zero-overhead single-shot fast path.
 """
 
+import asyncio
 import os
 import re
 
@@ -126,6 +127,90 @@ def _safe_hard_cut(segment: str, max_chars: int) -> int:
         if m.start() < cut < m.end():
             return m.start() - 1 if m.start() > 0 else cut
     return cut
+
+
+async def synthesize_chunked(gen_fn, text: str, *, log, label: str) -> tuple:
+    """Shared chunk loop: split → per-chunk *gen_fn* in a thread → crossfade.
+
+    *gen_fn(chunk_text)* is a sync callable returning ``(np.float32 audio,
+    sample_rate)``; per-chunk trims belong inside it. Returns
+    ``(pcm_bytes, rate)``.
+    """
+    chunks = split_text_into_chunks(text, max_chunk_chars())
+    if len(chunks) <= 1:
+        audio, rate = await asyncio.to_thread(gen_fn, text)
+        return audio.tobytes(), rate
+    log.info("%s: %d chars -> %d chunks", label, len(text), len(chunks))
+    parts: list = []
+    rate = 24_000
+    for i, chunk in enumerate(chunks, 1):
+        log.info("%s chunk %d/%d (%d chars)", label, i, len(chunks), len(chunk))
+        audio, rate = await asyncio.to_thread(gen_fn, chunk)
+        parts.append(audio)
+    return crossfade_concat(parts, rate).tobytes(), rate
+
+
+def trim_tts_output(
+    audio: np.ndarray,
+    sample_rate: int = 24_000,
+    frame_ms: int = 20,
+    silence_threshold_db: float = -40.0,
+    min_silence_ms: int = 200,
+    max_internal_silence_ms: int = 1000,
+    fade_ms: int = 30,
+) -> np.ndarray:
+    """Trim trailing silence and post-silence hallucination from TTS output.
+
+    Chatterbox sometimes produces ``[speech][silence][hallucinated noise]``.
+    Cut at the first internal silence gap longer than *max_internal_silence_ms*,
+    trim trailing silence, and apply a short cosine fade-out. Ported from
+    Voicebox's ``utils/audio.py`` for per-chunk use with the Chatterbox engines.
+    """
+    frame_len = int(sample_rate * frame_ms / 1000)
+    if frame_len == 0 or len(audio) < frame_len:
+        return audio
+
+    n_frames = len(audio) // frame_len
+    threshold_linear = 10 ** (silence_threshold_db / 20)
+    framed = audio[: n_frames * frame_len].reshape(n_frames, frame_len)
+    rms = np.sqrt(np.mean(framed.astype(np.float64) ** 2, axis=1))
+    is_speech = rms >= threshold_linear
+
+    first_speech = 0
+    for i, s in enumerate(is_speech):
+        if s:
+            first_speech = max(0, i - 1)  # keep 1 frame padding
+            break
+
+    # walk forward from first speech; cut at long internal silence gaps
+    max_silence_frames = int(max_internal_silence_ms / frame_ms)
+    consecutive_silence = 0
+    cut_frame = n_frames
+    for i in range(first_speech, n_frames):
+        if is_speech[i]:
+            consecutive_silence = 0
+        else:
+            consecutive_silence += 1
+            if consecutive_silence >= max_silence_frames:
+                cut_frame = i - consecutive_silence + 1
+                break
+
+    # trim trailing silence from the cut point, keeping a short tail
+    min_silence_frames = int(min_silence_ms / frame_ms)
+    end_frame = cut_frame
+    while end_frame > first_speech and not is_speech[end_frame - 1]:
+        end_frame -= 1
+    end_frame = min(end_frame + min_silence_frames, cut_frame)
+
+    start_sample = first_speech * frame_len
+    end_sample = min(end_frame * frame_len, len(audio))
+    trimmed = np.array(audio[start_sample:end_sample], dtype=np.float32, copy=True)
+
+    fade_samples = int(sample_rate * fade_ms / 1000)
+    if fade_samples > 0 and len(trimmed) > fade_samples:
+        fade = np.cos(np.linspace(0, np.pi / 2, fade_samples, dtype=np.float32)) ** 2
+        trimmed[-fade_samples:] *= fade
+    return trimmed
 
 
 def crossfade_concat(

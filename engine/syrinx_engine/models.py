@@ -57,32 +57,37 @@ CATALOG: list = [
     ModelSpec("qwen-custom-voice-1.7B", "Qwen CustomVoice 1.7B", "voice", "qwen_custom_voice", "1.7B",
               ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"], 3500,
               "9 preset voices + natural-language style control (instruct).",
-              gpu_recommended=True, min_ram_gb=8.0, supported=False),
+              gpu_recommended=True, min_ram_gb=8.0, supported=True),
     ModelSpec("qwen-custom-voice-0.6B", "Qwen CustomVoice 0.6B", "voice", "qwen_custom_voice", "0.6B",
               ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"], 1200,
               "Same 9 presets + instruct, lighter and faster.",
-              gpu_recommended=True, min_ram_gb=4.0, supported=False),
+              gpu_recommended=True, min_ram_gb=4.0, supported=True),
     # needs the real k2 wheel matching the venv's torch (k2-fsa.github.io/k2/cpu.html);
     # the PyPI "k2" package is a stub and the vocoder segfaults without the real one.
     ModelSpec("luxtts", "LuxTTS", "voice", "luxtts", "", ["YatharthS/LuxTTS"], 300,
               "ZipVoice-based, 48kHz, >150x realtime. CPU-friendly cloning, English.",
               gpu_recommended=False, min_ram_gb=2.0, supported=True),
+    # chatterbox-tts installs --no-deps (stale pins); sub-deps in engine[chatterbox]
     ModelSpec("chatterbox", "Chatterbox (Multilingual)", "voice", "chatterbox", "",
               ["ResembleAI/chatterbox"], 3200,
               "23 languages with emotion exaggeration. GPU recommended.",
-              gpu_recommended=True, min_ram_gb=8.0, supported=False),
+              gpu_recommended=True, min_ram_gb=8.0, supported=True),
     ModelSpec("chatterbox-turbo", "Chatterbox Turbo", "voice", "chatterbox_turbo", "",
               ["ResembleAI/chatterbox-turbo"], 1500,
               "350M English model with [laugh]/[cough] tags.",
-              gpu_recommended=True, min_ram_gb=4.0, supported=False),
+              gpu_recommended=True, min_ram_gb=4.0, supported=True),
+    # hume-tada installs --no-deps (stale torch pin); the Llama tokenizer
+    # (ungated unsloth mirror, ~2 MB) is fetched by the backend at load time —
+    # listing the repo here would drag in 2.5 GB of unused Llama weights and
+    # break cached-detection (tokenizer-only repos have no weight files).
     ModelSpec("tada-1b", "TADA 1B", "voice", "tada", "1B",
-              ["HumeAI/tada-1b", "HumeAI/tada-codec", "unsloth/Llama-3.2-1B"], 4000,
+              ["HumeAI/tada-1b", "HumeAI/tada-codec"], 4000,
               "Llama-3.2-1B speech-LM, 700s+ coherent audio. English.",
-              gpu_recommended=True, min_ram_gb=8.0, supported=False),
+              gpu_recommended=True, min_ram_gb=8.0, supported=True),
     ModelSpec("tada-3b-ml", "TADA 3B Multilingual", "voice", "tada", "3B",
-              ["HumeAI/tada-3b-ml", "HumeAI/tada-codec", "unsloth/Llama-3.2-1B"], 8000,
+              ["HumeAI/tada-3b-ml", "HumeAI/tada-codec"], 8000,
               "Llama-3.2-3B speech-LM, 10 languages. Heavy.",
-              gpu_recommended=True, min_ram_gb=16.0, supported=False),
+              gpu_recommended=True, min_ram_gb=16.0, supported=True),
     # ---- Transcription (faster-whisper / CTranslate2) ----
     ModelSpec("whisper-base", "Whisper Base", "stt", "whisper", "base.en",
               ["Systran/faster-whisper-base.en"], 150,

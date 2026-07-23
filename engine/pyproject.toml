@@ -25,6 +25,29 @@ qwen = [
     "transformers>=4.36.0",
 ]
 
+# Chatterbox sub-dependencies. chatterbox-tts itself pins numpy<1.26 /
+# torch==2.6 / transformers==4.46.3 (all stale; runs fine on the modern
+# stack), so install it SEPARATELY with --no-deps:
+#   pip install -e 'engine[chatterbox]' && pip install chatterbox-tts --no-deps
+chatterbox = [
+    "conformer>=0.3.2",
+    "diffusers>=0.29.0",
+    "omegaconf",
+    "pykakasi",
+    "resemble-perth>=1.0.1",
+    "s3tokenizer",
+    "spacy-pkuseg",
+    "pyloudnorm",
+    # resemble-perth still imports pkg_resources at runtime; setuptools>=81
+    # removed it and the watermarker silently degrades to None
+    "setuptools<81",
+]
+
+# TADA needs no extra sub-deps beyond the main stack (dac_shim.py replaces
+# descript-audio-codec), but hume-tada itself pins torch>=2.7,<2.8 (stale),
+# so install it SEPARATELY with --no-deps:
+#   pip install hume-tada --no-deps
+
 [project.scripts]
 syrinx-engine = "syrinx_engine.__main__:main"
 
