@@ -227,10 +227,15 @@ component VoiceCard inherits Rectangle {
         // RIGHT: panel avatar behind a divider
         if panel : Rectangle { width: 1px; background: Theme.brd; }
         if panel : Rectangle {
-            width: root.width * 0.4;
             // inset so the image stops at the card's border/bevel highlight
             // instead of painting over it
             property <length> inset: root.win95 ? 2px : root.border-width;
+            // pin the panel to the crop dialog's 3:5 viewport aspect so the
+            // crop is WYSIWYG at any window size (a proportional 40% width
+            // rendered near-square on wide windows and cover-cropped the
+            // top/bottom off). The 45% cap only bites on narrow cards and
+            // trims the sides, never faces.
+            width: min(root.width * 0.45, (root.height - 2 * self.inset) * 0.6);
             Rectangle {
                 x: 0; y: parent.inset;
                 width: parent.width - parent.inset;
@@ -1787,7 +1792,10 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 Text {
                                     text: sec.label; font-size: 11px; font-weight: 700;
-                                    color: Theme.name == "win95" ? #ffffff : Theme.dim;
+                                    // vista/aero: the panel gradient darkens toward the
+                                    // bottom and swallows the dim color
+                                    color: Theme.name == "win95" || Theme.name == "vista"
+                                        ? #ffffff : Theme.dim;
                                 }
                                 if sec.cat == "voice" : VerticalLayout {
                                     spacing: 8px;
