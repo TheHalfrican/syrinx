@@ -210,19 +210,22 @@ class EngineInterface(ServiceInterface):
         return req_id
 
     @method()
-    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s", label: "s", transcript: "s") -> "u":  # noqa: F821
+    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s", label: "s", transcript: "s", mode: "s") -> "u":  # noqa: F821
         """Style-preserved voice conversion (the ⇄ tab): re-render the speech
         in *audio_path* with a cloned profile's voice, keeping the source's
         delivery (words/timing/prosody — only the timbre changes). *engine*
-        "" = the default (chatterbox_vc). The history row stores *transcript*
-        (the source's words) as its text and folds *label* into the display
-        name ("<voice> · <label>"). Returns a generation id; progress and
-        errors arrive via GenerationProgress, and the result auto-plays and
-        lands in history exactly like Speak."""
-        return self._start_convert(audio_path, profile_id, engine, label, transcript)
+        "" = the default (chatterbox_vc; seed_vc when *mode* is "music").
+        *mode* "music" runs the song pipeline: demucs vocal split →
+        f0-conditioned conversion → remix over the instrumental. The history
+        row stores *transcript* (the source's words) as its text and folds
+        *label* into the display name ("<voice> · <label>"). Returns a
+        generation id; progress and errors arrive via GenerationProgress, and
+        the result auto-plays and lands in history exactly like Speak."""
+        return self._start_convert(audio_path, profile_id, engine, label, transcript, mode)
 
     def _start_convert(
-        self, audio_path: str, profile_id: str, engine: str, label: str, transcript: str
+        self, audio_path: str, profile_id: str, engine: str, label: str,
+        transcript: str, mode: str,
     ) -> int:
         gen_id = self._next_gen_id
         self._next_gen_id += 1
@@ -237,17 +240,29 @@ class EngineInterface(ServiceInterface):
                     raise ValueError(
                         f"{prof.name} has no reference samples to convert to"
                     )
-                be = self._tts.vc_backend(engine)
+                music = mode == "music"
+                be = self._tts.vc_backend(engine or ("seed_vc" if music else ""))
+                if music and not hasattr(be, "convert_music"):
+                    raise ValueError(f"{be.engine_name} does not support music mode")
                 be.check_source(audio_path)  # cheap cap check before any load
                 self.GenerationProgress(gen_id, "loading model", 0.0)
                 await be.load()
-                self.GenerationProgress(gen_id, "converting", 0.3)
-                pcm, rate = await be.convert(audio_path, prof)
+                if music:
+                    # stages stream back from the worker: separating /
+                    # converting / remixing — forwarded verbatim
+                    pcm, rate = await be.convert_music(
+                        audio_path, prof,
+                        on_stage=lambda s: self.GenerationProgress(gen_id, s, 0.5),
+                    )
+                else:
+                    self.GenerationProgress(gen_id, "converting", 0.3)
+                    pcm, rate = await be.convert(audio_path, prof)
                 duration = audio.duration_of(pcm, rate)
                 # label becomes part of the display name (apply-effects style);
                 # the row's text is the source transcript so the history card's
                 # read-only box shows the words that were spoken
-                title = f"{prof.name} · {label.strip()}" if label.strip() else prof.name
+                name = f"{prof.name} ♫" if music else prof.name
+                title = f"{name} · {label.strip()}" if label.strip() else name
                 clip_id = ""
                 try:
                     item = self._history.save_clip(

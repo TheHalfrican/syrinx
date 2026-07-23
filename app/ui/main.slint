@@ -597,10 +597,13 @@ export component AppWindow inherits Window {
     in property <string> vc-error: "";
     in property <[string]> vc-voice-names: []; // cloned profiles with samples
     in-out property <int> vc-voice-index: 0;
-    // conversion models — ids resolved in Rust (VC_ENGINE_IDS); Vevo2
-    // joins with the music mode
+    // conversion models — ids resolved in Rust (VC_ENGINE_IDS / VC_MUSIC_ENGINE_IDS)
     in property <[string]> vc-engine-names: ["Chatterbox VC", "Seed-VC", "Vevo-Timbre"];
     in-out property <int> vc-engine-index: 0;
+    in-out property <string> vc-mode: "speech";  // "speech" | "music"
+    // music mode = singing-capable engines only (Vevo2 joins here)
+    in property <[string]> vc-music-engine-names: ["Seed-VC (singing)"];
+    in-out property <int> vc-music-engine-index: 0;
     in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)
     in property <[HistItem]> vc-history;       // conversion results (right rail)
     in property <string> vc-transcript;        // auto-transcribed source words
@@ -1682,6 +1685,40 @@ export component AppWindow inherits Window {
                         // workspace column
                         VerticalLayout {
                             spacing: 12px; horizontal-stretch: 1;
+                            // mode toggle — speech dub vs full-song cover
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Rectangle {
+                                    border-width: 1px; border-color: Theme.brd; border-radius: Theme.rad; background: Theme.card-bg;
+                                    HorizontalLayout {
+                                        padding: 4px; spacing: 4px;
+                                        for md in [
+                                            { k: "speech", l: "Speech" }, { k: "music", l: "♫ Music" }
+                                        ] : Rectangle {
+                                            border-radius: Theme.rad;
+                                            background: vc-mode == md.k ? Theme.acc : transparent;
+                                            TouchArea { clicked => { if (!vc-busy && !vc-recording) { vc-mode = md.k; } } }
+                                            HorizontalLayout {
+                                                padding-left: 10px; padding-right: 10px;
+                                                Text {
+                                                    text: md.l; font-size: 11.5px; vertical-alignment: center;
+                                                    color: vc-mode == md.k ? Theme.acc-fg : Theme.dim;
+                                                }
+                                            }
+                                            height: 26px;
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: vc-mode == "music"
+                                        ? "vocals are isolated, converted, and remixed over the instrumental"
+                                        : "";
+                                    font-size: 10.5px; font-family: Theme.mono;
+                                    color: Theme.name == "vista" ? #ffffff : Theme.dim;
+                                    vertical-alignment: center; overflow: elide;
+                                    preferred-width: 0px; horizontal-stretch: 1;
+                                }
+                            }
                             // 1 — source
                             Text { text: "1 · SOURCE AUDIO"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             HorizontalLayout {
@@ -1838,14 +1875,21 @@ export component AppWindow inherits Window {
                                     model: vc-voice-names;
                                     current-index <=> vc-voice-index;
                                 }
-                                // which model performs the conversion
-                                ThemedDropdown {
+                                // which model performs the conversion (music
+                                // mode lists only singing-capable engines)
+                                if vc-mode == "speech" : ThemedDropdown {
                                     horizontal-stretch: 1;
                                     model: vc-engine-names;
                                     current-index <=> vc-engine-index;
                                 }
+                                if vc-mode == "music" : ThemedDropdown {
+                                    horizontal-stretch: 1;
+                                    model: vc-music-engine-names;
+                                    current-index <=> vc-music-engine-index;
+                                }
                                 TBtn {
-                                    label: vc-busy ? "…" : "⇄ Convert"; generate: true; min-width: 130px;
+                                    label: vc-busy ? "…" : (vc-mode == "music" ? "♫ Convert" : "⇄ Convert");
+                                    generate: true; min-width: 130px;
                                     clicked => {
                                         if (!vc-busy && !vc-recording && vc-has-source && vc-voice-names.length > 0) {
                                             root.vc-convert(vc-voice-index);
@@ -1877,7 +1921,9 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Text {
-                                text: "The conversion keeps the original words, timing and delivery — only the voice changes. Results play when ready and land in the rail here and in History (labeled ⇄ VC).";
+                                text: vc-mode == "music"
+                                    ? "Music mode: the vocal track is isolated (demucs), converted to the target voice with melody-following f0, and remixed over the original instrumental. Results land in the rail and History with a ♫ mark."
+                                    : "The conversion keeps the original words, timing and delivery — only the voice changes. Results play when ready and land in the rail here and in History (labeled ⇄ VC).";
                                 font-size: 11px; wrap: word-wrap;
                                 color: Theme.name == "vista" ? #ffffff : Theme.dim;
                             }

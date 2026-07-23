@@ -62,7 +62,7 @@ enum Cmd {
     VcLoad,
     VcToggleRecord { system: bool },
     VcPickFile,
-    VcConvert { index: usize, engine_index: usize, label: String, transcript: String },
+    VcConvert { index: usize, engine_index: usize, label: String, transcript: String, mode: String },
     VcSaveClip { name: String, transcript: String },
     VcDeleteClip { id: String },
     VcArmClip { id: String },
@@ -435,9 +435,14 @@ fn main() -> anyhow::Result<()> {
             let ui = ui_weak.unwrap();
             let label = ui.get_vc_result_name().to_string();
             let transcript = ui.get_vc_transcript().to_string();
-            let engine_index = ui.get_vc_engine_index().max(0) as usize;
+            let mode = ui.get_vc_mode().to_string();
+            let engine_index = if mode == "music" {
+                ui.get_vc_music_engine_index().max(0) as usize
+            } else {
+                ui.get_vc_engine_index().max(0) as usize
+            };
             let _ = tx.send(Cmd::VcConvert {
-                index: i.max(0) as usize, engine_index, label, transcript,
+                index: i.max(0) as usize, engine_index, label, transcript, mode,
             });
         });
     }
@@ -965,6 +970,8 @@ fn is_vc_engine(engine: &str) -> bool {
 
 /// Conversion-model ids, index-aligned with the vc-engine-names dropdown.
 const VC_ENGINE_IDS: &[&str] = &["chatterbox_vc", "seed_vc", "vevo_timbre"];
+/// Music-mode ids, index-aligned with vc-music-engine-names (singing-capable).
+const VC_MUSIC_ENGINE_IDS: &[&str] = &["seed_vc"];
 
 fn build_history(json: &str) -> Vec<HistItem> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
@@ -1634,6 +1641,7 @@ async fn worker(
     let mut vc_source: Option<String> = None;       // armed source path
     let mut vc_voice_ids: Vec<String> = Vec::new(); // parallel to the dropdown names
     let mut pending_vc: u32 = 0;                    // in-flight conversion gen id
+    let mut pending_vc_music = false;               // that conversion is a song cover
     // (id, name, path, cached transcript)
     let mut vc_clips_data: Vec<(String, String, String, String)> = Vec::new();
     let mut vc_audition_gen: u32 = 0;               // audition playback gen (0 = none)
@@ -1680,7 +1688,10 @@ async fn worker(
                     } else if is_vc {
                         let stage: SharedString = match a.state.as_str() {
                             "loading model" => "loading model…".into(),
+                            "separating" => "separating stems…".into(),
+                            "converting" if pending_vc_music => "converting vocals…".into(),
                             "converting" => "converting…".into(),
+                            "remixing" => "remixing…".into(),
                             "playing" => "done — playing · saved to History".into(),
                             s => s.into(),
                         };
@@ -2841,14 +2852,16 @@ async fn worker(
                         }
                     }
                 }
-                Some(Cmd::VcConvert { index, engine_index, label, transcript }) => {
+                Some(Cmd::VcConvert { index, engine_index, label, transcript, mode }) => {
                     if let (Some(src), Some(pid)) =
                         (vc_source.clone(), vc_voice_ids.get(index).cloned())
                     {
-                        let engine = VC_ENGINE_IDS.get(engine_index).copied().unwrap_or("");
-                        match proxy.convert_voice(&src, &pid, engine, &label, &transcript).await {
+                        let table = if mode == "music" { VC_MUSIC_ENGINE_IDS } else { VC_ENGINE_IDS };
+                        let engine = table.get(engine_index).copied().unwrap_or("");
+                        match proxy.convert_voice(&src, &pid, engine, &label, &transcript, &mode).await {
                             Ok(gid) if gid != 0 => {
                                 pending_vc = gid;
+                                pending_vc_music = mode == "music";
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_vc_busy(true);
                                     ui.set_vc_error("".into());

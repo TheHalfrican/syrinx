@@ -90,12 +90,13 @@ pub trait Engine {
 
     /// Style-preserved voice conversion: re-render the speech in `audio_path`
     /// with a cloned profile's voice, keeping the source delivery (only the
-    /// timbre changes). `engine` "" = the default (chatterbox_vc). The history
-    /// row stores `transcript` (the source's words) as its text and folds
-    /// `label` into the display name. Returns a generation id; progress/errors
-    /// arrive via `GenerationProgress`, and the result auto-plays and lands in
-    /// history like Speak.
-    fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str, label: &str, transcript: &str) -> zbus::Result<u32>;
+    /// timbre changes). `engine` "" = the default (chatterbox_vc; seed_vc in
+    /// music mode). `mode` "music" = demucs vocal split → f0 conversion →
+    /// remix over the instrumental. The history row stores `transcript` as
+    /// its text and folds `label` into the display name. Returns a generation
+    /// id; progress/errors arrive via `GenerationProgress`, and the result
+    /// auto-plays and lands in history like Speak.
+    fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str, label: &str, transcript: &str, mode: &str) -> zbus::Result<u32>;
 
     /// Copy an audio file into the voice-changer clip store; returns the new
     /// clip id ("" on failure). An empty name gets a time-based default;

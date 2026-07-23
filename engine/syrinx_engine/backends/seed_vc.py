@@ -96,27 +96,15 @@ class SeedVCBackend:
     def invalidate_profile(self, profile_id: str) -> None:
         (self._voices_dir / f"{profile_id}_cbxref.wav").unlink(missing_ok=True)
 
-    async def convert(
-        self, source_wav: str, profile, *, f0: bool = False, semitone: int = 0
-    ) -> tuple[bytes, int]:
-        """Re-render *source_wav* in *profile*'s voice; (pcm_f32_bytes, rate).
-
-        *f0* switches to the f0-conditioned 44k singing model (music mode).
-        """
-        self.check_source(source_wav)
-        ref = combined_ref_wav(profile, self._voices_dir)
+    async def _request(self, payload: dict, on_stage=None) -> tuple[bytes, int]:
+        """One worker round-trip; interim {"stage": …} lines hit *on_stage*."""
         async with self._lock:
             await self._ensure_worker()
             self._req_id += 1
             rid = self._req_id
-            payload = json.dumps({
-                "id": rid, "source": str(source_wav), "target": ref,
-                "f0": f0, "steps": _steps(), "auto_f0": True,
-                "semitone": semitone,
-            }) + "\n"
-            self._proc.stdin.write(payload.encode())
+            payload = dict(payload, id=rid)
+            self._proc.stdin.write((json.dumps(payload) + "\n").encode())
             await self._proc.stdin.drain()
-            log.info("convert [%s] -> profile %s (f0=%s)", self.engine_name, profile.id, f0)
             while True:
                 line = await self._proc.stdout.readline()
                 if not line:
@@ -132,6 +120,10 @@ class SeedVCBackend:
                 if resp.get("id") != rid:
                     log.debug("seedvc stale reply %s (want %s)", resp.get("id"), rid)
                     continue
+                if "stage" in resp:
+                    if on_stage:
+                        on_stage(resp["stage"])
+                    continue
                 break
         if not resp.get("ok"):
             raise RuntimeError(f"Seed-VC conversion failed: {resp.get('error')}")
@@ -140,3 +132,30 @@ class SeedVCBackend:
         pcm = raw_path.read_bytes()
         raw_path.unlink(missing_ok=True)
         return pcm, rate
+
+    async def convert(
+        self, source_wav: str, profile, *, f0: bool = False, semitone: int = 0
+    ) -> tuple[bytes, int]:
+        """Re-render *source_wav* in *profile*'s voice; (pcm_f32_bytes, rate)."""
+        self.check_source(source_wav)
+        ref = combined_ref_wav(profile, self._voices_dir)
+        log.info("convert [%s] -> profile %s (f0=%s)", self.engine_name, profile.id, f0)
+        return await self._request({
+            "source": str(source_wav), "target": ref,
+            "f0": f0, "steps": _steps(), "auto_f0": True, "semitone": semitone,
+        })
+
+    async def convert_music(
+        self, source_wav: str, profile, *, on_stage=None, semitone: int = 0
+    ) -> tuple[bytes, int]:
+        """Song cover: demucs vocal split → f0 conversion → remix over the
+        instrumental. Stage names ("separating"/"converting"/"remixing")
+        stream to *on_stage* as the worker progresses."""
+        self.check_source(source_wav)
+        ref = combined_ref_wav(profile, self._voices_dir)
+        log.info("convert-music [%s] -> profile %s", self.engine_name, profile.id)
+        return await self._request({
+            "cmd": "music", "source": str(source_wav), "target": ref,
+            # singing wants more diffusion steps (upstream recommends 30-50)
+            "steps": max(_steps(), 30), "auto_f0": True, "semitone": semitone,
+        }, on_stage=on_stage)
