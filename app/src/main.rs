@@ -899,6 +899,11 @@ fn recorded_label(wav: &str) -> String {
 }
 
 /// SIGINT `pw-record` so it finalizes the WAV header, then reap it.
+///
+/// The wait is bounded: a recorder that shrugs off the SIGINT (freshly spawned
+/// children inherit an ignored SIGINT until parecord installs its handler)
+/// would otherwise park the whole worker loop in `wait()` — frozen timers,
+/// dead buttons. After 2 s we SIGKILL, which cannot be ignored.
 async fn stop_pw_record(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         let _ = tokio::process::Command::new("kill")
@@ -906,7 +911,11 @@ async fn stop_pw_record(child: &mut tokio::process::Child) {
             .status()
             .await;
     }
-    let _ = child.wait().await;
+    let grace = std::time::Duration::from_secs(2);
+    if tokio::time::timeout(grace, child.wait()).await.is_err() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
 }
 
 /// Format seconds as m:ss (Voicebox-style meta).
@@ -1541,6 +1550,12 @@ async fn worker(
     let cv_wav = cv_wav_path();
     let mut cv_sample: Option<String> = None;
     let mut rec_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    // The interval is only polled while a recording is live; with the default
+    // Burst behavior every idle minute becomes a backlog of instant ticks the
+    // moment recording starts — the elapsed counter then blows through the cap
+    // in milliseconds and insta-stops the capture. Delay = never tick faster
+    // than the period, regardless of backlog.
+    rec_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut rec_elapsed: u32 = 0;
     const REC_MAX: u32 = 30;
 
@@ -1744,6 +1759,18 @@ async fn worker(
                 }
             }
             _ = rec_interval.tick(), if cv_rec.is_some() || tr_rec.is_some() || vc_rec.is_some() => {
+                // recorder died on its own (e.g. a suspended monitor source
+                // erroring at first open) — surface it instead of a phantom
+                // "recording" that never advances
+                if let Some(child) = vc_rec.as_mut() {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        vc_rec = None;
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_vc_recording(false);
+                            ui.set_vc_status("⚠ recorder exited — try again or check the source".into());
+                        }).ok();
+                    }
+                }
                 if vc_rec.is_some() {
                     vc_elapsed += 1;
                     if vc_elapsed >= VC_REC_MAX {
@@ -2462,6 +2489,7 @@ async fn worker(
                                 Ok(child) => {
                                     tr_rec = Some(child);
                                     tr_elapsed = 0;
+                                    rec_interval.reset();  // first tick a full second out
                                     let mode = if system { "system" } else { "mic" };
                                     ui.upgrade_in_event_loop(move |ui| {
                                         ui.set_tr_text("".into());
@@ -2607,6 +2635,7 @@ async fn worker(
                                 Ok(child) => {
                                     vc_rec = Some(child);
                                     vc_elapsed = 0;
+                                    rec_interval.reset();  // first tick a full second out
                                     let mode = if system { "system" } else { "mic" };
                                     ui.upgrade_in_event_loop(move |ui| {
                                         ui.set_vc_has_source(false);
