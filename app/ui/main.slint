@@ -605,7 +605,10 @@ export component AppWindow inherits Window {
     in property <[string]> vc-music-engine-names: ["Seed-VC (singing)"];
     in-out property <int> vc-music-engine-index: 0;
     in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)
-    in property <[HistItem]> vc-history;       // conversion results (right rail)
+    // conversion results (right rail), split by mode — the ♫ title marker
+    // decides which list a row lands in
+    in property <[HistItem]> vc-history-speech;
+    in property <[HistItem]> vc-history-music;
     in property <string> vc-transcript;        // auto-transcribed source words
     in property <bool> vc-transcribing;
     in property <string> vc-armed-id: "";      // saved clip armed as source ("" = scratch/import)
@@ -1937,7 +1940,8 @@ export component AppWindow inherits Window {
                                 vertical-stretch: 1;
                                 VerticalLayout {
                                     spacing: 8px;
-                                    for h in vc-history : Rectangle {
+                                    // the toggle picks which conversions show
+                                    for h in (vc-mode == "music" ? vc-history-music : vc-history-speech) : Rectangle {
                                         // fixed height so the ScrollView scrolls
                                         height: 84px;
                                         border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -1987,8 +1991,9 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
-                                    if vc-history.length == 0 : Text {
-                                        text: "— no conversions yet —"; font-size: 10.5px; font-family: Theme.mono;
+                                    if (vc-mode == "music" ? vc-history-music.length : vc-history-speech.length) == 0 : Text {
+                                        text: vc-mode == "music" ? "— no music conversions yet —" : "— no speech conversions yet —";
+                                        font-size: 10.5px; font-family: Theme.mono;
                                         color: Theme.dim; horizontal-alignment: center;
                                     }
                                 }

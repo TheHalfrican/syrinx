@@ -1382,10 +1382,24 @@ fn set_history_model(ui: &AppWindow, items: Vec<HistItem>) {
             h
         })
         .collect();
-    if let Some(vm) = ui.get_vc_history().as_any().downcast_ref::<VecModel<HistItem>>() {
-        vm.set_vec(vc);
+    // music covers carry the ♫ marker on the voice segment of the title;
+    // the ⇄ rail shows only the current mode's rows
+    let (vc_music, vc_speech): (Vec<HistItem>, Vec<HistItem>) = vc.into_iter().partition(|h| {
+        h.voice
+            .split(" · ")
+            .next()
+            .map(|s| s.trim_end().ends_with('♫'))
+            .unwrap_or(false)
+    });
+    if let Some(vm) = ui.get_vc_history_speech().as_any().downcast_ref::<VecModel<HistItem>>() {
+        vm.set_vec(vc_speech);
     } else {
-        ui.set_vc_history(ModelRc::from(Rc::new(VecModel::from(vc))));
+        ui.set_vc_history_speech(ModelRc::from(Rc::new(VecModel::from(vc_speech))));
+    }
+    if let Some(vm) = ui.get_vc_history_music().as_any().downcast_ref::<VecModel<HistItem>>() {
+        vm.set_vec(vc_music);
+    } else {
+        ui.set_vc_history_music(ModelRc::from(Rc::new(VecModel::from(vc_music))));
     }
     if let Some(vm) = ui.get_history().as_any().downcast_ref::<VecModel<HistItem>>() {
         vm.set_vec(items);
