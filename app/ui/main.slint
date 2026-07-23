@@ -484,6 +484,9 @@ component LabeledInput inherits VerticalLayout {
 // --- a model catalog row (Models tab) ---
 component ModelRow inherits Rectangle {
     in property <ModelItem> m;
+    // false for conversion engines: the ⇄ tab's dropdown picks per
+    // conversion, so there is no "Use"/active concept to offer
+    in property <bool> selectable: true;
     callback download();
     callback del();
     callback activate();
@@ -530,7 +533,7 @@ component ModelRow inherits Rectangle {
             }
             if !m.downloading : HorizontalLayout {
                 alignment: end; spacing: 6px;
-                if m.downloaded && m.supported && !m.active : TBtn { label: "Use"; clicked => { root.activate(); } }
+                if m.downloaded && m.supported && !m.active && selectable : TBtn { label: "Use"; clicked => { root.activate(); } }
                 if m.downloaded : TBtn { label: "Delete"; clicked => { root.del(); } }
                 if !m.downloaded && m.supported : TBtn { label: "Download"; generate: true; clicked => { root.download(); } }
                 if !m.downloaded && !m.supported : Text { text: "no backend yet"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
@@ -643,6 +646,7 @@ export component AppWindow inherits Window {
     in property <[ModelItem]> voice-models;
     in property <[ModelItem]> stt-models;
     in property <[ModelItem]> llm-models;
+    in property <[ModelItem]> vc-conv-models;  // ⇄ conversion engines (no "Use")
     in property <string> hardware-line;
     // --- player (full-clip waveform + scrub) ---
     in property <bool> player-active;
@@ -2166,6 +2170,7 @@ export component AppWindow inherits Window {
                             padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 8px;
                             for sec in [
                                 { label: "VOICE & CLONING", cat: "voice" },
+                                { label: "VOICE CONVERSION (⇄ CONVERTER)", cat: "vc" },
                                 { label: "TRANSCRIPTION", cat: "stt" },
                                 { label: "LANGUAGE (COMPOSE / REWRITE)", cat: "llm" },
                             ] : VerticalLayout {
@@ -2184,6 +2189,14 @@ export component AppWindow inherits Window {
                                         download => { root.download-model(m.id); }
                                         del => { root.delete-model(m.id); }
                                         activate => { root.activate-model(m.id); }
+                                    }
+                                }
+                                if sec.cat == "vc" : VerticalLayout {
+                                    spacing: 8px;
+                                    for m in vc-conv-models : ModelRow {
+                                        m: m; selectable: false;
+                                        download => { root.download-model(m.id); }
+                                        del => { root.delete-model(m.id); }
                                     }
                                 }
                                 if sec.cat == "stt" : VerticalLayout {

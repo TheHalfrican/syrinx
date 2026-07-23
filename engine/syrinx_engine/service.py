@@ -448,8 +448,12 @@ class EngineInterface(ServiceInterface):
 
     @method()
     async def SetActiveModel(self, model_id: "s") -> "s":  # noqa: F821
-        category = self._models.set_active(model_id)
         s = model_spec(model_id)
+        if s and s.category == "vc":
+            # conversion engines are picked per-conversion in the ⇄ tab —
+            # nothing to activate (and no ACTIVE badge to claim)
+            return "vc"
+        category = self._models.set_active(model_id)
         if s and category == "llm":
             self._llm.set_model(s.size)
         elif s and category == "stt":

@@ -26,8 +26,8 @@ log = logging.getLogger("syrinx.engine.models")
 class ModelSpec:
     id: str
     display: str
-    category: str  # "voice" | "stt" | "llm"
-    engine: str  # kokoro|qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|whisper|qwen_llm
+    category: str  # "voice" | "stt" | "llm" | "vc"
+    engine: str  # kokoro|qwen|…|whisper|qwen_llm|chatterbox_vc|seed_vc|vevo_timbre
     size: str  # "1.7B" | "0.6B" | "base.en" | ""
     repos: list  # HF repo ids to fetch
     size_mb: int
@@ -35,6 +35,7 @@ class ModelSpec:
     gpu_recommended: bool = False
     min_ram_gb: float = 2.0
     supported: bool = True  # has a working backend in Syrinx today
+    patterns: list = None  # snapshot_download allow_patterns (None = whole repo)
 
 
 # --- the catalog ------------------------------------------------------------
@@ -119,6 +120,33 @@ CATALOG: list = [
     ModelSpec("qwen3-4b", "Qwen3 4B", "llm", "qwen_llm", "4B", ["Qwen/Qwen3-4B"],
               8000, "Highest-quality local rewrites. GPU recommended.",
               gpu_recommended=True, min_ram_gb=12.0, supported=True),
+
+    # ---- Voice conversion (the ⇄ Voice Converter tab) ----
+    # No "active" concept: the converter's model dropdown picks per conversion,
+    # so these rows only download / report / delete weights.
+    ModelSpec("chatterbox-vc", "Chatterbox VC", "vc", "chatterbox_vc", "",
+              ["ResembleAI/chatterbox"], 2150,
+              "Style-preserved conversion — the S3 half of Chatterbox. Shares its "
+              "weights with Chatterbox (Multilingual).",
+              gpu_recommended=False, min_ram_gb=4.0, supported=True,
+              patterns=["s3gen.safetensors", "conds.pt"]),
+    ModelSpec("seed-vc", "Seed-VC", "vc", "seed_vc", "",
+              ["Plachta/Seed-VC", "funasr/campplus",
+               "nvidia/bigvgan_v2_22khz_80band_256x", "openai/whisper-small"], 1850,
+              "Diffusion conversion, speech + singing (f0). Isolated venv: run "
+              "engine/setup-seedvc.sh once.",
+              gpu_recommended=True, min_ram_gb=6.0, supported=True,
+              # skip the tf/flax duplicates of whisper-small
+              patterns=["*.safetensors", "*.bin", "*.pt", "*.pth", "*.json",
+                        "*.txt", "*.yml", "*.yaml", "*.model"]),
+    ModelSpec("vevo-timbre", "Vevo-Timbre", "vc", "vevo_timbre", "",
+              ["amphion/Vevo"], 2750,
+              "Amphion's timbre-only converter — keeps the source delivery most "
+              "literally. Isolated venv: run engine/setup-vevo.sh once. "
+              "Non-commercial weights.",
+              gpu_recommended=True, min_ram_gb=8.0, supported=True,
+              patterns=["tokenizer/vq8192/*", "acoustic_modeling/Vq8192ToMels/*",
+                        "acoustic_modeling/Vocoder/*"]),
 ]
 
 _BY_ID = {m.id: m for m in CATALOG}
@@ -171,19 +199,50 @@ def _hf_cache() -> Path:
         return Path.home() / ".cache" / "huggingface" / "hub"
 
 
-def _repo_dir(repo: str) -> Path:
-    return _hf_cache() / ("models--" + repo.replace("/", "--"))
+# seed-vc downloads through its own package into this two-tier layout under
+# the worker's cwd (the seedvc data dir) — encoded here so the Models tab
+# pre-fetches / reports / deletes the exact files the worker uses. Everything
+# else (incl. chatterbox-vc and the migrated vevo weights) uses the standard
+# HF cache.
+_SEEDVC_CACHE = {
+    "Plachta/Seed-VC": "checkpoints",
+    "funasr/campplus": "checkpoints",
+    "nvidia/bigvgan_v2_22khz_80band_256x": "checkpoints/hf_cache",
+    "openai/whisper-small": "checkpoints/hf_cache",
+}
+
+_ENGINE_DIR = Path(__file__).resolve().parents[1]
 
 
-def _repo_bytes(repo: str) -> int:
-    blobs = _repo_dir(repo) / "blobs"
+def _cache_root(m, repo: str):
+    """Cache base for a spec's repo (None = the default HF cache)."""
+    if m is not None and m.id == "seed-vc":
+        return _data_dir() / "seedvc" / _SEEDVC_CACHE.get(repo, "checkpoints")
+    return None
+
+
+def _repo_dir(repo: str, base: "Path | None" = None) -> Path:
+    return (base or _hf_cache()) / ("models--" + repo.replace("/", "--"))
+
+
+def _repo_bytes(repo: str, base: "Path | None" = None) -> int:
+    blobs = _repo_dir(repo, base) / "blobs"
     if not blobs.exists():
         return 0
     return sum(f.stat().st_size for f in blobs.glob("*") if f.is_file())
 
 
-def is_repo_cached(repo: str) -> bool:
-    d = _repo_dir(repo)
+def _vc_setup_warning(m: "ModelSpec") -> str:
+    """Conversion engines that live in isolated venvs need a one-time setup."""
+    if m.engine == "seed_vc" and not (_ENGINE_DIR / ".venv-seedvc").exists():
+        return "run engine/setup-seedvc.sh first"
+    if m.engine == "vevo_timbre" and not (_ENGINE_DIR / ".venv-vevo").exists():
+        return "run engine/setup-vevo.sh first"
+    return ""
+
+
+def is_repo_cached(repo: str, base: "Path | None" = None) -> bool:
+    d = _repo_dir(repo, base)
     if not d.exists():
         return False
     blobs = d / "blobs"
@@ -200,7 +259,7 @@ def is_repo_cached(repo: str) -> bool:
 
 
 def is_cached(m: "ModelSpec") -> bool:
-    return all(is_repo_cached(r) for r in m.repos)
+    return all(is_repo_cached(r, _cache_root(m, r)) for r in m.repos)
 
 
 # --- manager: download / delete / active selection --------------------------
@@ -252,7 +311,7 @@ class ModelManager:
                 "downloaded": is_cached(m),
                 "downloading": m.id in self._downloading,
                 "active": self._active.get(m.category) == m.id,
-                "warning": hardware_warning(m, hw),
+                "warning": _vc_setup_warning(m) or hardware_warning(m, hw),
             }
             for m in CATALOG
         ]
@@ -269,7 +328,7 @@ class ModelManager:
 
         async def poll() -> None:
             while not done.is_set():
-                got = sum(_repo_bytes(r) for r in m.repos)
+                got = sum(_repo_bytes(r, _cache_root(m, r)) for r in m.repos)
                 on_progress(model_id, min(0.999, got / total), "downloading")
                 try:
                     await asyncio.wait_for(done.wait(), timeout=0.5)
@@ -280,7 +339,12 @@ class ModelManager:
             from huggingface_hub import snapshot_download
 
             for r in m.repos:
-                snapshot_download(r)
+                base = _cache_root(m, r)
+                snapshot_download(
+                    r,
+                    cache_dir=str(base) if base else None,
+                    allow_patterns=m.patterns,
+                )
 
         poll_task = asyncio.create_task(poll())
         ok = True
@@ -301,6 +365,6 @@ class ModelManager:
         if not m:
             return
         for r in m.repos:
-            d = _repo_dir(r)
+            d = _repo_dir(r, _cache_root(m, r))
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)

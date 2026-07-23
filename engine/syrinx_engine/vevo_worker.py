@@ -49,20 +49,17 @@ def _load():
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     print(f"vevo-worker: downloading/loading models on {device}...", file=sys.stderr, flush=True)
-    # Same three components as Amphion's infer_vevotimbre.py, cached in the
-    # clone's ./ckpts (we are chdir'd into the clone).
-    local_dir = "./ckpts/Vevo"
+    # Same three components as Amphion's infer_vevotimbre.py, but in the
+    # STANDARD HF cache (not the clone's ./ckpts) so the Models tab's
+    # download/status/delete machinery covers the same files.
     tokenizer_dir = snapshot_download(
-        repo_id="amphion/Vevo", cache_dir=local_dir,
-        allow_patterns=["tokenizer/vq8192/*"],
+        repo_id="amphion/Vevo", allow_patterns=["tokenizer/vq8192/*"],
     )
     fmt_dir = snapshot_download(
-        repo_id="amphion/Vevo", cache_dir=local_dir,
-        allow_patterns=["acoustic_modeling/Vq8192ToMels/*"],
+        repo_id="amphion/Vevo", allow_patterns=["acoustic_modeling/Vq8192ToMels/*"],
     )
     vocoder_dir = snapshot_download(
-        repo_id="amphion/Vevo", cache_dir=local_dir,
-        allow_patterns=["acoustic_modeling/Vocoder/*"],
+        repo_id="amphion/Vevo", allow_patterns=["acoustic_modeling/Vocoder/*"],
     )
     _PIPELINE = VevoInferencePipeline(
         content_style_tokenizer_ckpt_path=os.path.join(tokenizer_dir, "tokenizer/vq8192"),

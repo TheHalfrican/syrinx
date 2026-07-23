@@ -1007,9 +1007,9 @@ fn size_label(mb: i64) -> String {
 }
 
 /// Build the three category model lists from the engine's ListModels JSON.
-fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>) {
+fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>) {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
-    let (mut voice, mut stt, mut llm) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut voice, mut stt, mut llm, mut vc) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for m in arr.iter() {
         let s = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let b = |k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1030,10 +1030,11 @@ fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>) 
             "voice" => voice.push(item),
             "stt" => stt.push(item),
             "llm" => llm.push(item),
+            "vc" => vc.push(item),
             _ => {}
         }
     }
-    (voice, stt, llm)
+    (voice, stt, llm, vc)
 }
 
 /// One-line hardware summary for the Models header.
@@ -1061,7 +1062,7 @@ async fn refresh_models(
 ) -> (Vec<(String, String)>, String) {
     let models_json = proxy.list_models().await.unwrap_or_else(|_| "[]".into());
     let hw_json = proxy.hardware().await.unwrap_or_default();
-    let (voice, stt, llm) = build_models(&models_json);
+    let (voice, stt, llm, vc_conv) = build_models(&models_json);
     let hwline = hardware_line(&hw_json);
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(&models_json).unwrap_or_default();
@@ -1090,6 +1091,7 @@ async fn refresh_models(
         ui.set_voice_models(ModelRc::from(Rc::new(VecModel::from(voice))));
         ui.set_stt_models(ModelRc::from(Rc::new(VecModel::from(stt))));
         ui.set_llm_models(ModelRc::from(Rc::new(VecModel::from(llm))));
+        ui.set_vc_conv_models(ModelRc::from(Rc::new(VecModel::from(vc_conv))));
         ui.set_hardware_line(hwline.into());
         ui.set_composer_engines(ModelRc::from(Rc::new(VecModel::from(eng_names))));
         ui.set_composer_engine_index(active_idx);
