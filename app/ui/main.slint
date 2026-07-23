@@ -594,9 +594,9 @@ export component AppWindow inherits Window {
     in property <string> vc-error: "";
     in property <[string]> vc-voice-names: []; // cloned profiles with samples
     in-out property <int> vc-voice-index: 0;
-    // conversion models — ids resolved in Rust (VC_ENGINE_IDS); phase 2
-    // adds Seed-VC / Vevo entries here
-    in property <[string]> vc-engine-names: ["Chatterbox VC"];
+    // conversion models — ids resolved in Rust (VC_ENGINE_IDS); Vevo
+    // entries land here next
+    in property <[string]> vc-engine-names: ["Chatterbox VC", "Seed-VC"];
     in-out property <int> vc-engine-index: 0;
     in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)
     in property <[HistItem]> vc-history;       // conversion results (right rail)

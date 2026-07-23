@@ -1,0 +1,142 @@
+"""Seed-VC backend — voice conversion via an isolated worker (.venv-seedvc).
+
+Seed-VC is GPL-3.0, so it is NEVER vendored into this repo: the package lives
+in its own venv and `seedvc_worker.py` (a thin adapter over its public API)
+runs as a subprocess speaking JSON over stdin/stdout — the same pattern as
+LuxTTS. It also pins numpy<2, which alone rules out the engine venv.
+
+Zero-shot, style-preserved, and — unlike ChatterboxVC — f0-conditioned
+singing conversion is available (the "f0" request flag; wired for the music
+mode later). CPU-usable; the worker auto-selects CUDA on the GPU box.
+"""
+
+import asyncio
+import json
+import logging
+import os
+from pathlib import Path
+
+from . import detect_device
+from .chatterbox import combined_ref_wav
+from .chatterbox_vc import check_source_cap
+
+log = logging.getLogger("syrinx.engine.vc.seedvc")
+
+_HERE = Path(__file__).resolve()
+_ENGINE_DIR = _HERE.parents[2]  # .../engine
+_SEEDVC_PY = _ENGINE_DIR / ".venv-seedvc" / "bin" / "python"
+_WORKER = _HERE.parents[1] / "seedvc_worker.py"
+_STDERR_LOG = Path.home() / ".cache" / "syrinx-seedvc.log"
+
+
+def _steps() -> int:
+    try:
+        return int(os.environ.get("SYRINX_SEEDVC_STEPS", "25"))
+    except ValueError:
+        return 25
+
+
+class SeedVCBackend:
+    """Seed-VC behind the small async VC interface:
+    check_source / load / convert / unload / invalidate_profile."""
+
+    engine_name = "seed_vc"
+    supports_cloning = False  # conversion only
+
+    def __init__(self) -> None:
+        self.device = detect_device()
+        self.model_size = "default"
+        self._proc = None
+        self._lock = asyncio.Lock()
+        self._req_id = 0
+        data_dir = os.environ.get(
+            "SYRINX_DATA_DIR", str(Path.home() / ".local" / "share" / "syrinx")
+        )
+        self._voices_dir = Path(data_dir) / "voices"
+        self._voices_dir.mkdir(parents=True, exist_ok=True)
+        # seed-vc downloads models to ./checkpoints relative to CWD — pin the
+        # worker's cwd here so weights never land in (and get committed to)
+        # whatever directory the engine happened to start from
+        self._work_dir = Path(data_dir) / "seedvc"
+        self._work_dir.mkdir(parents=True, exist_ok=True)
+
+    def check_source(self, source_wav: str) -> None:
+        check_source_cap(source_wav)
+
+    async def _ensure_worker(self) -> None:
+        if self._proc is not None and self._proc.returncode is None:
+            return
+        if not _SEEDVC_PY.exists():
+            raise RuntimeError(
+                "Seed-VC is not installed on this machine (.venv-seedvc missing)"
+            )
+        _STDERR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        errfile = open(_STDERR_LOG, "ab")
+        self._proc = await asyncio.create_subprocess_exec(
+            str(_SEEDVC_PY), str(_WORKER),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=errfile,
+            cwd=str(self._work_dir),
+        )
+        log.info("Seed-VC worker started (pid %s)", self._proc.pid)
+
+    async def load(self) -> None:
+        await self._ensure_worker()
+
+    def unload(self) -> None:
+        """Stop the worker (it exits when stdin closes), freeing its memory."""
+        if self._proc is not None:
+            try:
+                self._proc.stdin.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._proc = None
+
+    def invalidate_profile(self, profile_id: str) -> None:
+        (self._voices_dir / f"{profile_id}_cbxref.wav").unlink(missing_ok=True)
+
+    async def convert(
+        self, source_wav: str, profile, *, f0: bool = False, semitone: int = 0
+    ) -> tuple[bytes, int]:
+        """Re-render *source_wav* in *profile*'s voice; (pcm_f32_bytes, rate).
+
+        *f0* switches to the f0-conditioned 44k singing model (music mode).
+        """
+        self.check_source(source_wav)
+        ref = combined_ref_wav(profile, self._voices_dir)
+        async with self._lock:
+            await self._ensure_worker()
+            self._req_id += 1
+            rid = self._req_id
+            payload = json.dumps({
+                "id": rid, "source": str(source_wav), "target": ref,
+                "f0": f0, "steps": _steps(), "auto_f0": True,
+                "semitone": semitone,
+            }) + "\n"
+            self._proc.stdin.write(payload.encode())
+            await self._proc.stdin.drain()
+            log.info("convert [%s] -> profile %s (f0=%s)", self.engine_name, profile.id, f0)
+            while True:
+                line = await self._proc.stdout.readline()
+                if not line:
+                    self._proc = None
+                    raise RuntimeError(
+                        "Seed-VC worker exited (see ~/.cache/syrinx-seedvc.log)"
+                    )
+                try:
+                    resp = json.loads(line.decode())
+                except json.JSONDecodeError:
+                    log.debug("seedvc worker noise: %s", line.decode(errors="replace").rstrip())
+                    continue
+                if resp.get("id") != rid:
+                    log.debug("seedvc stale reply %s (want %s)", resp.get("id"), rid)
+                    continue
+                break
+        if not resp.get("ok"):
+            raise RuntimeError(f"Seed-VC conversion failed: {resp.get('error')}")
+        raw_path = Path(resp["raw"])
+        rate = int(resp["rate"])
+        pcm = raw_path.read_bytes()
+        raw_path.unlink(missing_ok=True)
+        return pcm, rate

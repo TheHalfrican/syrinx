@@ -39,5 +39,9 @@ HANDOFF-4090*
 *~
 .DS_Store
 
-# isolated LuxTTS engine venv
-engine/.venv-luxtts/
+# isolated engine venvs (luxtts, seedvc, …)
+engine/.venv-*/
+
+# seed-vc downloads to ./checkpoints relative to its cwd — the worker runs
+# with cwd pinned OUTSIDE the repo, but never let a stray run commit weights
+/checkpoints/

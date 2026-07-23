@@ -35,6 +35,31 @@ TURBO_HF_REPO = "ResembleAI/chatterbox-turbo"
 _TORCH_LOAD_LOCK = threading.Lock()
 
 
+def combined_ref_wav(profile, voices_dir: Path) -> str:
+    """Combined reference wav for a profile (cached on disk, shared by the
+    chatterbox backends AND the VC engines that take a reference path).
+
+    The multi-sample combining is per-sample peak normalization +
+    concatenation (Voicebox's combine_voice_prompts).
+    """
+    out = voices_dir / f"{profile.id}_cbxref.wav"
+    if out.exists():
+        return str(out)
+    import soundfile as sf
+
+    if not profile.samples:
+        raise ValueError(f"profile {profile.id} has no samples to clone from")
+    parts, rate = [], 24_000
+    for s in profile.samples:
+        audio, rate = sf.read(s.audio_path, dtype="float32")
+        if getattr(audio, "ndim", 1) > 1:
+            audio = audio.mean(axis=1)  # to mono
+        peak = float(np.abs(audio).max()) or 1.0
+        parts.append(audio / peak * 0.95)
+    sf.write(out, np.concatenate(parts).astype(np.float32), rate)
+    return str(out)
+
+
 def _as_f32(wav) -> np.ndarray:
     try:
         import torch
@@ -145,28 +170,7 @@ class _ChatterboxBase:
         (self._voices_dir / f"{profile_id}_cbxref.wav").unlink(missing_ok=True)
 
     def _ref_wav(self, profile) -> str:
-        """Combined reference wav for a profile (cached on disk).
-
-        Chatterbox takes the reference as a path at generation time, so the
-        multi-sample combining is just per-sample peak normalization +
-        concatenation (Voicebox's combine_voice_prompts).
-        """
-        out = self._voices_dir / f"{profile.id}_cbxref.wav"
-        if out.exists():
-            return str(out)
-        import soundfile as sf
-
-        if not profile.samples:
-            raise ValueError(f"profile {profile.id} has no samples to clone from")
-        parts, rate = [], 24_000
-        for s in profile.samples:
-            audio, rate = sf.read(s.audio_path, dtype="float32")
-            if getattr(audio, "ndim", 1) > 1:
-                audio = audio.mean(axis=1)  # to mono
-            peak = float(np.abs(audio).max()) or 1.0
-            parts.append(audio / peak * 0.95)
-        sf.write(out, np.concatenate(parts).astype(np.float32), rate)
-        return str(out)
+        return combined_ref_wav(profile, self._voices_dir)
 
     # --- synthesis --------------------------------------------------------
 

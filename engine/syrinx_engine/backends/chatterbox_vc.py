@@ -48,6 +48,18 @@ def _source_secs(path: str) -> float:
             return -1.0
 
 
+def check_source_cap(source_wav: str) -> None:
+    """Reject over-cap sources before any model load is paid (shared by all
+    VC backends)."""
+    secs = _source_secs(source_wav)
+    cap = max_source_secs()
+    if secs > cap:
+        raise ValueError(
+            f"source is {secs:.0f} s — the conversion cap is {cap:.0f} s "
+            "(SYRINX_VC_MAX_SECS)"
+        )
+
+
 class ChatterboxVCBackend(_ChatterboxBase):
     """chatterbox.vc.ChatterboxVC behind the small async VC interface:
     check_source / load / convert / unload / invalidate_profile."""
@@ -72,14 +84,7 @@ class ChatterboxVCBackend(_ChatterboxBase):
         log.info("ChatterboxVC loaded")
 
     def check_source(self, source_wav: str) -> None:
-        """Reject over-cap sources before any model load is paid."""
-        secs = _source_secs(source_wav)
-        cap = max_source_secs()
-        if secs > cap:
-            raise ValueError(
-                f"source is {secs:.0f} s — the conversion cap is {cap:.0f} s "
-                "(SYRINX_VC_MAX_SECS)"
-            )
+        check_source_cap(source_wav)
 
     async def convert(self, source_wav: str, profile) -> tuple[bytes, int]:
         """Re-render *source_wav* in *profile*'s voice; (pcm_f32_bytes, rate).
