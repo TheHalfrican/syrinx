@@ -62,7 +62,7 @@ enum Cmd {
     VcLoad,
     VcToggleRecord { system: bool },
     VcPickFile,
-    VcConvert { index: usize, label: String },
+    VcConvert { index: usize, label: String, transcript: String },
     VcSaveClip { name: String },
     VcDeleteClip { id: String },
     VcArmClip { id: String },
@@ -434,7 +434,8 @@ fn main() -> anyhow::Result<()> {
         ui.on_vc_convert(move |i| {
             let ui = ui_weak.unwrap();
             let label = ui.get_vc_result_name().to_string();
-            let _ = tx.send(Cmd::VcConvert { index: i.max(0) as usize, label });
+            let transcript = ui.get_vc_transcript().to_string();
+            let _ = tx.send(Cmd::VcConvert { index: i.max(0) as usize, label, transcript });
         });
     }
     {
@@ -2809,11 +2810,11 @@ async fn worker(
                         }
                     }
                 }
-                Some(Cmd::VcConvert { index, label }) => {
+                Some(Cmd::VcConvert { index, label, transcript }) => {
                     if let (Some(src), Some(pid)) =
                         (vc_source.clone(), vc_voice_ids.get(index).cloned())
                     {
-                        match proxy.convert_voice(&src, &pid, "", &label).await {
+                        match proxy.convert_voice(&src, &pid, "", &label, &transcript).await {
                             Ok(gid) if gid != 0 => {
                                 pending_vc = gid;
                                 ui.upgrade_in_event_loop(|ui| {

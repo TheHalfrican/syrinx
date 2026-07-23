@@ -210,17 +210,20 @@ class EngineInterface(ServiceInterface):
         return req_id
 
     @method()
-    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s", label: "s") -> "u":  # noqa: F821
+    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s", label: "s", transcript: "s") -> "u":  # noqa: F821
         """Style-preserved voice conversion (the ⇄ tab): re-render the speech
         in *audio_path* with a cloned profile's voice, keeping the source's
         delivery (words/timing/prosody — only the timbre changes). *engine*
-        "" = the default (chatterbox_vc); *label* names the history row ("" =
-        derived from the source filename). Returns a generation id; progress
-        and errors arrive via GenerationProgress, and the result auto-plays
-        and lands in history exactly like Speak."""
-        return self._start_convert(audio_path, profile_id, engine, label)
+        "" = the default (chatterbox_vc). The history row stores *transcript*
+        (the source's words) as its text and folds *label* into the display
+        name ("<voice> · <label>"). Returns a generation id; progress and
+        errors arrive via GenerationProgress, and the result auto-plays and
+        lands in history exactly like Speak."""
+        return self._start_convert(audio_path, profile_id, engine, label, transcript)
 
-    def _start_convert(self, audio_path: str, profile_id: str, engine: str, label: str) -> int:
+    def _start_convert(
+        self, audio_path: str, profile_id: str, engine: str, label: str, transcript: str
+    ) -> int:
         gen_id = self._next_gen_id
         self._next_gen_id += 1
 
@@ -241,12 +244,17 @@ class EngineInterface(ServiceInterface):
                 self.GenerationProgress(gen_id, "converting", 0.3)
                 pcm, rate = await be.convert(audio_path, prof)
                 duration = audio.duration_of(pcm, rate)
+                # label becomes part of the display name (apply-effects style);
+                # the row's text is the source transcript so the history card's
+                # read-only box shows the words that were spoken
+                title = f"{prof.name} · {label.strip()}" if label.strip() else prof.name
                 clip_id = ""
                 try:
                     item = self._history.save_clip(
                         voice_id=profile_id,
-                        voice_name=prof.name,
-                        text=label.strip() or f"[voice conversion] {Path(audio_path).name}",
+                        voice_name=title,
+                        text=transcript.strip()
+                        or f"[voice conversion] {Path(audio_path).name}",
                         pcm=pcm,
                         sample_rate=rate,
                         engine=be.engine_name,
@@ -260,7 +268,7 @@ class EngineInterface(ServiceInterface):
                 await self._play(
                     gen_id, pcm, rate,
                     on_start=lambda: self.PlaybackInfo(
-                        gen_id, clip_id, prof.name, duration, bars
+                        gen_id, clip_id, title, duration, bars
                     ),
                 )
             except asyncio.CancelledError:

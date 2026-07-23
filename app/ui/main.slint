@@ -1879,8 +1879,9 @@ export component AppWindow inherits Window {
                                         if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
                                         VerticalLayout {
                                             padding: 10px; spacing: 4px;
-                                            Text { text: h.text; font-size: 11.5px; font-weight: 700; color: Theme.fg; overflow: elide; }
-                                            Text { text: h.voice + " · " + h.meta; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; overflow: elide; }
+                                            // voice · optional title (the row's text is the transcript)
+                                            Text { text: h.voice; font-size: 11.5px; font-weight: 700; color: Theme.fg; overflow: elide; }
+                                            Text { text: h.meta; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; overflow: elide; }
                                             HorizontalLayout {
                                                 spacing: 4px;
                                                 Rectangle {
