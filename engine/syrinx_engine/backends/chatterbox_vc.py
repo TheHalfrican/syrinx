@@ -24,11 +24,17 @@ log = logging.getLogger("syrinx.engine.vc.chatterbox")
 
 def max_source_secs() -> float:
     """Conversion source cap — S3Gen memory scales with source length.
-    Chunked conversion (silence-boundary splits) is the planned lift."""
+    Settings-tab value wins; SYRINX_VC_MAX_SECS stays the fallback."""
+    from .. import settings
+
     try:
-        return float(os.environ.get("SYRINX_VC_MAX_SECS", "180"))
+        env = float(os.environ.get("SYRINX_VC_MAX_SECS", "180"))
     except ValueError:
-        return 180.0
+        env = 180.0
+    try:
+        return float(settings.value("vc_max_secs", env))
+    except (TypeError, ValueError):
+        return env
 
 
 def _source_secs(path: str) -> float:

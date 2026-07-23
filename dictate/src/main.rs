@@ -138,11 +138,31 @@ fn stop_and_transcribe() -> Result<()> {
     Ok(())
 }
 
-/// Opt-in LLM cleanup of the transcript: `--refine` anywhere in the args or
-/// SYRINX_DICTATE_REFINE=1. Off by default — the LLM pass adds ~8–15 s on CPU.
+/// Opt-in LLM cleanup of the transcript: `--refine` anywhere in the args,
+/// SYRINX_DICTATE_REFINE=1, or the Settings tab's "Refine transcript" toggle
+/// (~/.config/syrinx/settings.json). Off by default — the LLM pass adds
+/// ~8–15 s on CPU.
 fn refine_enabled() -> bool {
     std::env::args().any(|a| a == "--refine")
         || std::env::var("SYRINX_DICTATE_REFINE").ok().as_deref() == Some("1")
+        || config_refine()
+}
+
+/// The app's shared settings file — same one the ⚙ tab writes.
+fn config_refine() -> bool {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| {
+            std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        });
+    let Ok(base) = base else { return false };
+    let Ok(text) = std::fs::read_to_string(base.join("syrinx").join("settings.json")) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("refine_dictation").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
 }
 
 /// Run the transcript through the engine's refinement LLM (fillers out,

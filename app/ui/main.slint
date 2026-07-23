@@ -1,5 +1,7 @@
 // Syrinx — main window. Themed shell + TTS workspace, wired to the engine.
 import { Theme } from "theme.slint";
+// re-export so Rust can restore the persisted theme at startup
+export { Theme }
 import { ScrollView } from "std-widgets.slint";
 
 export struct VoiceItem {
@@ -926,6 +928,27 @@ export component AppWindow inherits Window {
     callback lib-refilter();                   // any filter control changed
     callback lib-save-tags();
 
+    // --- settings (⚙ tab) ---
+    in property <[string]> st-mic-names: ["System default"];
+    in-out property <int> st-mic-index: 0;
+    in property <[string]> st-mon-names: ["Default sink monitor"];
+    in-out property <int> st-mon-index: 0;
+    in property <bool> st-refine: false;
+    in property <string> st-export-dir: "";
+    in property <string> st-data-dir: "";
+    in property <[string]> st-cap-names: ["3:00"];
+    in-out property <int> st-cap-index: 0;
+    in property <[string]> st-steps-names: ["25"];
+    in-out property <int> st-steps-index: 0;
+    callback settings-open();        // (re)load devices + engine settings
+    callback st-pick-mic(int);
+    callback st-pick-monitor(int);
+    callback st-toggle-refine();
+    callback st-pick-export-dir();
+    callback st-pick-cap(int);
+    callback st-pick-steps(int);
+    callback theme-changed(string);  // persist the picked theme
+
     callback voices-open();          // (re)load the table when the tab opens
     callback voices-search(string);
     callback vp-select(string);      // row click -> inspector
@@ -982,7 +1005,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout { alignment: center; NavIcon { glyph: "◈"; active: tab == "models"; clicked => { tab = "models"; }
                         hover-changed(on, y) => { nav-tip = on ? "Models" : ""; nav-tip-y = y; } } }
                     Rectangle {}
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "⚙"; active: tab == "settings"; clicked => { tab = "settings"; }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "⚙"; active: tab == "settings"; clicked => { tab = "settings"; root.settings-open(); }
                         hover-changed(on, y) => { nav-tip = on ? "Settings" : ""; nav-tip-y = y; } } }
                 }
             }
@@ -1002,6 +1025,7 @@ export component AppWindow inherits Window {
                                     : tab == "voices" ? "Voices"
                                     : tab == "vc" ? "Voice Converter"
                                     : tab == "lib" ? "Audio Library"
+                                    : tab == "settings" ? "Settings"
                                     : (tab == "models" ? "Models" : "Coming soon");
                                 font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg;
                             }
@@ -1011,6 +1035,7 @@ export component AppWindow inherits Window {
                                     : tab == "voices" ? "Every profile in one place — inspect, audition, manage."
                                     : tab == "vc" ? "Dub any recording with one of your voices — the delivery stays, the timbre changes."
                                     : tab == "lib" ? "Every generation, saved and searchable."
+                                    : tab == "settings" ? "Audio devices, paths, keybinds and themes."
                                     : (tab == "models" ? hardware-line : "This screen is stubbed for now.");
                                 font-size: 12px; color: Theme.name == "win95" ? #cfe6e6 : Theme.dim;
                             }
@@ -1027,7 +1052,7 @@ export component AppWindow inherits Window {
                                 ] : Rectangle {
                                     border-radius: Theme.rad;
                                     background: Theme.name == th.k ? Theme.acc : transparent;
-                                    tta := TouchArea { clicked => { Theme.name = th.k; } }
+                                    tta := TouchArea { clicked => { Theme.name = th.k; root.theme-changed(th.k); } }
                                     HorizontalLayout {
                                         padding-left: 10px; padding-right: 10px;
                                         Text {
@@ -2220,17 +2245,172 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // ---- stub for other tabs ----
-                    // whitelist of the still-stubbed tabs — the old exclusion
-                    // list silently kept rendering this above shipped views
-                    if tab == "settings" : Rectangle {
-                        HorizontalLayout {
-                            alignment: center;
-                            VerticalLayout {
-                                alignment: center; spacing: 10px;
-                                Text { text: "◈"; font-size: 34px; color: Theme.acc; horizontal-alignment: center; }
-                                Text { text: "Coming soon"; font-size: 16px; font-weight: 700; color: Theme.fg; horizontal-alignment: center; }
-                                TBtn { label: "Back to Text to Speech"; clicked => { tab = "tts"; } }
+                    // ---- Settings: the last stub falls ----
+                    if tab == "settings" : ScrollView {
+                        VerticalLayout {
+                            padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 10px;
+
+                            Text { text: "APPEARANCE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Rectangle {
+                                height: 56px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad; background: Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                HorizontalLayout {
+                                    padding-left: 14px; padding-right: 14px; spacing: 12px;
+                                    Text { text: "Theme"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; }
+                                    Rectangle {}
+                                    HorizontalLayout {
+                                        padding: 4px; spacing: 4px;
+                                        for th in [
+                                            { k: "vista", l: "Aero" }, { k: "win95", l: "'95" },
+                                            { k: "ps5", l: "Astro" }, { k: "rice", l: "Rice" }, { k: "tui", l: "TTY" }
+                                        ] : Rectangle {
+                                            border-radius: Theme.rad;
+                                            background: Theme.name == th.k ? Theme.acc : transparent;
+                                            TouchArea { clicked => { Theme.name = th.k; root.theme-changed(th.k); } }
+                                            HorizontalLayout {
+                                                padding-left: 10px; padding-right: 10px;
+                                                Text { text: th.l; font-size: 11.5px; vertical-alignment: center;
+                                                       color: Theme.name == th.k ? Theme.acc-fg : Theme.dim; }
+                                            }
+                                            height: 26px; y: parent.height / 2 - 13px;
+                                        }
+                                    }
+                                    Text { text: "persists across restarts"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
+                                }
+                            }
+
+                            Text { text: "AUDIO DEVICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Rectangle {
+                                height: 96px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad; background: Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                VerticalLayout {
+                                    padding: 14px; spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Microphone"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 130px; }
+                                        ThemedDropdown {
+                                            horizontal-stretch: 1;
+                                            model: st-mic-names;
+                                            current-index <=> st-mic-index;
+                                            selected(i) => { root.st-pick-mic(i); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "System tap"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 130px; }
+                                        ThemedDropdown {
+                                            horizontal-stretch: 1;
+                                            model: st-mon-names;
+                                            current-index <=> st-mon-index;
+                                            selected(i) => { root.st-pick-monitor(i); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text { text: "DICTATION"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Rectangle {
+                                height: 92px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad; background: Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                VerticalLayout {
+                                    padding: 14px; spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Refine transcript with LLM"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; horizontal-stretch: 1; }
+                                        TBtn {
+                                            label: st-refine ? "★ On" : "☆ Off"; generate: st-refine;
+                                            clicked => { root.st-toggle-refine(); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text {
+                                            text: "Hyprland bind:  bind = SUPER, D, exec, syrinx-dictate toggle";
+                                            font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                            vertical-alignment: center; overflow: elide;
+                                            preferred-width: 0px; horizontal-stretch: 1;
+                                        }
+                                        Rectangle {
+                                            width: 18px; height: 16px; border-radius: Theme.rad;
+                                            background: stbc.has-hover ? Theme.acc-soft : transparent;
+                                            stbi := TextInput { text: "bind = SUPER, D, exec, syrinx-dictate toggle"; read-only: true; opacity: 0; width: 1px; height: 1px; }
+                                            stbc := TouchArea { clicked => { stbi.select-all(); stbi.copy(); } }
+                                            Text { text: "⧉"; font-size: 10px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text { text: "VOICE CONVERTER"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Rectangle {
+                                height: 96px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad; background: Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                VerticalLayout {
+                                    padding: 14px; spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Source length cap"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 160px; }
+                                        ThemedDropdown {
+                                            width: 140px;
+                                            model: st-cap-names;
+                                            current-index <=> st-cap-index;
+                                            selected(i) => { root.st-pick-cap(i); }
+                                        }
+                                        Text { text: "longer sources need more memory"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
+                                        Rectangle {}
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Seed-VC quality steps"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 160px; }
+                                        ThemedDropdown {
+                                            width: 140px;
+                                            model: st-steps-names;
+                                            current-index <=> st-steps-index;
+                                            selected(i) => { root.st-pick-steps(i); }
+                                        }
+                                        Text { text: "more steps = better, slower (music always ≥30)"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
+                                        Rectangle {}
+                                    }
+                                }
+                            }
+
+                            Text { text: "PATHS"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Rectangle {
+                                height: 96px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad; background: Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                VerticalLayout {
+                                    padding: 14px; spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Export folder"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 130px; }
+                                        Text {
+                                            text: st-export-dir == "" ? "(ask every time)" : st-export-dir;
+                                            font-size: 11px; font-family: Theme.mono; color: Theme.dim;
+                                            vertical-alignment: center; overflow: elide;
+                                            preferred-width: 0px; horizontal-stretch: 1;
+                                        }
+                                        TBtn { label: "Choose…"; clicked => { root.st-pick-export-dir(); } }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Data directory"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 130px; }
+                                        Text {
+                                            text: st-data-dir; font-size: 11px; font-family: Theme.mono; color: Theme.dim;
+                                            vertical-alignment: center; overflow: elide;
+                                            preferred-width: 0px; horizontal-stretch: 1;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

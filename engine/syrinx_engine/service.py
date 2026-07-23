@@ -18,7 +18,7 @@ from .profiles import ProfileStore
 from .history import CaptureStore, HistoryStore, SourceClipStore
 from .llm import PersonalityLLM
 from .models import ModelManager, spec as model_spec, detect_hardware
-from . import audio, effects
+from . import audio, effects, settings as engine_settings
 
 log = logging.getLogger("syrinx.engine.service")
 
@@ -805,6 +805,32 @@ class EngineInterface(ServiceInterface):
 
         self._tasks[gen_id] = asyncio.create_task(run())
         return gen_id
+
+    # --- engine settings (the ⚙ tab's knobs) -----------------------------
+
+    @method()
+    async def GetSettings(self) -> "s":  # noqa: F821
+        """Persisted engine settings plus the currently effective values."""
+        from .backends.chatterbox_vc import max_source_secs
+        from .backends.seed_vc import _steps as seedvc_steps
+
+        return json.dumps({
+            "stored": engine_settings.all_values(),
+            "effective": {
+                "vc_max_secs": max_source_secs(),
+                "seedvc_steps": seedvc_steps(),
+            },
+        })
+
+    @method()
+    async def SetSetting(self, key: "s", value_json: "s") -> None:  # noqa: F821
+        """Set one engine setting (JSON-encoded value; null clears it)."""
+        try:
+            val = json.loads(value_json)
+        except json.JSONDecodeError:
+            return
+        engine_settings.set_value(key, val)
+        log.info("setting %s -> %r", key, val)
 
     @method()
     def Cancel(self, gen_id: "u") -> None:  # noqa: F821

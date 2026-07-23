@@ -67,6 +67,15 @@ enum Cmd {
     VcDeleteClip { id: String },
     VcArmClip { id: String },
     VcAudition { id: String },
+    // settings (⚙ tab)
+    SettingsLoad,
+    SaveTheme { theme: String },
+    StPickMic { index: usize },
+    StPickMonitor { index: usize },
+    StToggleRefine,
+    StPickExportDir,
+    StPickCap { index: usize },
+    StPickSteps { index: usize },
     // library (▤ tab)
     LibLoad,
     LibRefilter { q: String, type_idx: i32, voice_idx: i32, starred: bool, model_idx: i32 },
@@ -91,11 +100,60 @@ enum Cmd {
     FxePreview { hid: String },
 }
 
+/// App-side settings (~/.config/syrinx/settings.json) — written by the ⚙
+/// tab, read here at startup and by syrinx-dictate (refine toggle).
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct AppConfig {
+    theme: String,
+    mic_device: String,     // "" = system default source
+    monitor_device: String, // "" = default sink's monitor
+    refine_dictation: bool,
+    export_dir: String,
+}
+
+fn config_path() -> std::path::PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
+        })
+        .join("syrinx")
+        .join("settings.json")
+}
+
+fn load_config() -> AppConfig {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_config(cfg: &AppConfig) {
+    let p = config_path();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(cfg) {
+        if let Err(e) = std::fs::write(&p, text) {
+            tracing::error!("save settings.json failed: {e}");
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     let ui = AppWindow::new()?;
     let (tx, rx) = mpsc::unbounded_channel::<Cmd>();
+
+    // restore the persisted theme before first paint
+    {
+        let cfg = load_config();
+        if !cfg.theme.is_empty() {
+            ui.global::<Theme>().set_name(cfg.theme.into());
+        }
+    }
 
     let history = Rc::new(VecModel::<HistItem>::default());
     ui.set_history(ModelRc::from(history.clone()));
@@ -312,6 +370,39 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_cv_cancel(move || { let _ = tx.send(Cmd::CvCancel); });
+    }
+    // Settings view.
+    {
+        let tx = tx.clone();
+        ui.on_settings_open(move || { let _ = tx.send(Cmd::SettingsLoad); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_theme_changed(move |t| { let _ = tx.send(Cmd::SaveTheme { theme: t.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_pick_mic(move |i| { let _ = tx.send(Cmd::StPickMic { index: i.max(0) as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_pick_monitor(move |i| { let _ = tx.send(Cmd::StPickMonitor { index: i.max(0) as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_toggle_refine(move || { let _ = tx.send(Cmd::StToggleRefine); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_pick_export_dir(move || { let _ = tx.send(Cmd::StPickExportDir); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_pick_cap(move |i| { let _ = tx.send(Cmd::StPickCap { index: i.max(0) as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_pick_steps(move |i| { let _ = tx.send(Cmd::StPickSteps { index: i.max(0) as usize }); });
     }
     // Library view.
     {
@@ -1457,6 +1548,42 @@ fn build_captures(json: &str) -> Vec<CaptureItem> {
         .collect()
 }
 
+/// Export dialogs start in the Settings-tab folder when one is set.
+fn export_dialog(cfg_dir: &str) -> rfd::AsyncFileDialog {
+    let dlg = rfd::AsyncFileDialog::new();
+    if cfg_dir.is_empty() { dlg } else { dlg.set_directory(cfg_dir) }
+}
+
+/// Enumerate PipeWire capture devices via pactl: (mics, sink monitors),
+/// each as (technical name, human description).
+async fn list_audio_devices() -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let out = tokio::process::Command::new("pactl")
+        .args(["-f", "json", "list", "sources"])
+        .output()
+        .await;
+    let Ok(out) = out else { return (Vec::new(), Vec::new()) };
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let (mut mics, mut monitors) = (Vec::new(), Vec::new());
+    for s in &arr {
+        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let desc = s.get("description").and_then(|v| v.as_str()).unwrap_or(name);
+        if name.is_empty() {
+            continue;
+        }
+        if name.ends_with(".monitor") {
+            monitors.push((name.to_string(), desc.to_string()));
+        } else {
+            mics.push((name.to_string(), desc.to_string()));
+        }
+    }
+    (mics, monitors)
+}
+
+/// Push the ⚙ tab's state to the UI (devices, config, engine knobs).
+const ST_CAP_SECS: &[(i64, &str)] = &[(60, "1:00"), (180, "3:00"), (300, "5:00"), (600, "10:00")];
+const ST_STEP_OPTS: &[i64] = &[10, 25, 30, 40, 50];
+
 /// One library row's backing data (the slint model is derived per filter).
 struct LibRow {
     id: String,
@@ -1850,6 +1977,10 @@ async fn worker(
     let mut vc_audition_id = String::new();         // clip id or "scratch" being played
     let mut pending_vc_tr: u32 = 0;                 // source auto-transcription req id
     let mut vc_tr_clip = String::new();             // saved clip awaiting transcript backfill
+    // settings (⚙) — shared app config + enumerated capture devices
+    let mut cfg = load_config();
+    let mut st_mics: Vec<(String, String)> = Vec::new();
+    let mut st_mons: Vec<(String, String)> = Vec::new();
     // library (▤) state — rows cached, filters applied app-side
     let mut lib_rows: Vec<LibRow> = Vec::new();
     let mut lib_voices: Vec<String> = Vec::new();
@@ -2264,7 +2395,7 @@ async fn worker(
                     let src = proxy.history_audio_path(&id).await.unwrap_or_default();
                     if src.is_empty() {
                         tracing::error!("export audio: no source for {id}");
-                    } else if let Some(handle) = rfd::AsyncFileDialog::new()
+                    } else if let Some(handle) = export_dialog(&cfg.export_dir)
                         .set_file_name("syrinx-clip.wav")
                         .add_filter("WAV audio", &["wav"])
                         .save_file()
@@ -2278,7 +2409,7 @@ async fn worker(
                     }
                 }
                 Some(Cmd::ExportPackage { id }) => {
-                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                    if let Some(handle) = export_dialog(&cfg.export_dir)
                         .set_file_name("syrinx-clip.zip")
                         .add_filter("Zip package", &["zip"])
                         .save_file()
@@ -2293,7 +2424,18 @@ async fn worker(
                 }
                 Some(Cmd::CvStartRecord { system }) => {
                     // System audio = passive tap of the default sink's monitor.
-                    let target = if system { default_monitor().await } else { None };
+                    // Settings-tab device choices win; "" = system default
+                    let target = if system {
+                        if cfg.monitor_device.is_empty() {
+                            default_monitor().await
+                        } else {
+                            Some(cfg.monitor_device.clone())
+                        }
+                    } else if cfg.mic_device.is_empty() {
+                        None
+                    } else {
+                        Some(cfg.mic_device.clone())
+                    };
                     match start_pw_record(&cv_wav, target.as_deref()).await {
                         Ok(child) => {
                             cv_rec = Some(child);
@@ -2712,7 +2854,7 @@ async fn worker(
                         .chars()
                         .map(|c| if c.is_alphanumeric() { c } else { '-' })
                         .collect();
-                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                    if let Some(handle) = export_dialog(&cfg.export_dir)
                         .set_file_name(format!("{}.syrinx-voice.zip", safe.trim_matches('-')))
                         .add_filter("Syrinx voice package", &["zip"])
                         .save_file()
@@ -2851,7 +2993,18 @@ async fn worker(
                             }
                         }
                     } else {
-                        let device = if system { default_monitor().await } else { None };
+                        // Settings-tab device choices win; "" = system default
+                        let device = if system {
+                            if cfg.monitor_device.is_empty() {
+                                default_monitor().await
+                            } else {
+                                Some(cfg.monitor_device.clone())
+                            }
+                        } else if cfg.mic_device.is_empty() {
+                            None
+                        } else {
+                            Some(cfg.mic_device.clone())
+                        };
                         if system && device.is_none() {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_tr_status("no default sink monitor found".into());
@@ -3011,7 +3164,18 @@ async fn worker(
                             }
                         }
                     } else {
-                        let device = if system { default_monitor().await } else { None };
+                        // Settings-tab device choices win; "" = system default
+                        let device = if system {
+                            if cfg.monitor_device.is_empty() {
+                                default_monitor().await
+                            } else {
+                                Some(cfg.monitor_device.clone())
+                            }
+                        } else if cfg.mic_device.is_empty() {
+                            None
+                        } else {
+                            Some(cfg.mic_device.clone())
+                        };
                         if system && device.is_none() {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_vc_status("no default sink monitor found".into());
@@ -3227,6 +3391,105 @@ async fn worker(
                                     }).ok();
                                 }
                             }
+                        }
+                    }
+                }
+                Some(Cmd::SettingsLoad) => {
+                    let (mics, mons) = list_audio_devices().await;
+                    st_mics = mics;
+                    st_mons = mons;
+                    // effective engine knobs select the dropdown rows
+                    let (mut cap_secs, mut steps) = (180i64, 25i64);
+                    if let Ok(j) = proxy.get_settings().await {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&j) {
+                            if let Some(e) = v.get("effective") {
+                                cap_secs = e.get("vc_max_secs").and_then(|x| x.as_f64()).unwrap_or(180.0) as i64;
+                                steps = e.get("seedvc_steps").and_then(|x| x.as_i64()).unwrap_or(25);
+                            }
+                        }
+                    }
+                    let mic_names: Vec<SharedString> = std::iter::once(SharedString::from("System default"))
+                        .chain(st_mics.iter().map(|(_, d)| SharedString::from(d.as_str())))
+                        .collect();
+                    let mon_names: Vec<SharedString> = std::iter::once(SharedString::from("Default sink monitor"))
+                        .chain(st_mons.iter().map(|(_, d)| SharedString::from(d.as_str())))
+                        .collect();
+                    let mic_idx = st_mics.iter().position(|(n, _)| *n == cfg.mic_device)
+                        .map(|i| i as i32 + 1).unwrap_or(0);
+                    let mon_idx = st_mons.iter().position(|(n, _)| *n == cfg.monitor_device)
+                        .map(|i| i as i32 + 1).unwrap_or(0);
+                    let cap_names: Vec<SharedString> =
+                        ST_CAP_SECS.iter().map(|(_, l)| SharedString::from(*l)).collect();
+                    let cap_idx = ST_CAP_SECS.iter().position(|(s, _)| *s == cap_secs)
+                        .map(|i| i as i32).unwrap_or(1);
+                    let steps_names: Vec<SharedString> =
+                        ST_STEP_OPTS.iter().map(|s| SharedString::from(s.to_string().as_str())).collect();
+                    let steps_idx = ST_STEP_OPTS.iter().position(|s| *s == steps)
+                        .map(|i| i as i32).unwrap_or(1);
+                    let refine = cfg.refine_dictation;
+                    let export_dir = cfg.export_dir.clone();
+                    let data_dir = std::env::var("SYRINX_DATA_DIR").unwrap_or_else(|_| {
+                        format!("{}/.local/share/syrinx", std::env::var("HOME").unwrap_or_default())
+                    });
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_st_mic_names(ModelRc::from(Rc::new(VecModel::from(mic_names))));
+                        ui.set_st_mic_index(mic_idx);
+                        ui.set_st_mon_names(ModelRc::from(Rc::new(VecModel::from(mon_names))));
+                        ui.set_st_mon_index(mon_idx);
+                        ui.set_st_cap_names(ModelRc::from(Rc::new(VecModel::from(cap_names))));
+                        ui.set_st_cap_index(cap_idx);
+                        ui.set_st_steps_names(ModelRc::from(Rc::new(VecModel::from(steps_names))));
+                        ui.set_st_steps_index(steps_idx);
+                        ui.set_st_refine(refine);
+                        ui.set_st_export_dir(export_dir.into());
+                        ui.set_st_data_dir(data_dir.into());
+                    }).ok();
+                }
+                Some(Cmd::SaveTheme { theme }) => {
+                    cfg.theme = theme;
+                    save_config(&cfg);
+                }
+                Some(Cmd::StPickMic { index }) => {
+                    cfg.mic_device = if index == 0 {
+                        String::new()
+                    } else {
+                        st_mics.get(index - 1).map(|(n, _)| n.clone()).unwrap_or_default()
+                    };
+                    save_config(&cfg);
+                }
+                Some(Cmd::StPickMonitor { index }) => {
+                    cfg.monitor_device = if index == 0 {
+                        String::new()
+                    } else {
+                        st_mons.get(index - 1).map(|(n, _)| n.clone()).unwrap_or_default()
+                    };
+                    save_config(&cfg);
+                }
+                Some(Cmd::StToggleRefine) => {
+                    cfg.refine_dictation = !cfg.refine_dictation;
+                    save_config(&cfg);
+                    let on = cfg.refine_dictation;
+                    ui.upgrade_in_event_loop(move |ui| ui.set_st_refine(on)).ok();
+                }
+                Some(Cmd::StPickExportDir) => {
+                    if let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await {
+                        cfg.export_dir = handle.path().to_string_lossy().to_string();
+                        save_config(&cfg);
+                        let dir = cfg.export_dir.clone();
+                        ui.upgrade_in_event_loop(move |ui| ui.set_st_export_dir(dir.into())).ok();
+                    }
+                }
+                Some(Cmd::StPickCap { index }) => {
+                    if let Some((secs, _)) = ST_CAP_SECS.get(index) {
+                        if let Err(e) = proxy.set_setting("vc_max_secs", &secs.to_string()).await {
+                            tracing::error!("set vc cap failed: {e}");
+                        }
+                    }
+                }
+                Some(Cmd::StPickSteps { index }) => {
+                    if let Some(steps) = ST_STEP_OPTS.get(index) {
+                        if let Err(e) = proxy.set_setting("seedvc_steps", &steps.to_string()).await {
+                            tracing::error!("set seedvc steps failed: {e}");
                         }
                     }
                 }

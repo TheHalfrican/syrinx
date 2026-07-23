@@ -30,10 +30,17 @@ _STDERR_LOG = Path.home() / ".cache" / "syrinx-seedvc.log"
 
 
 def _steps() -> int:
+    """Diffusion steps — Settings-tab value wins; env stays the fallback."""
+    from .. import settings
+
     try:
-        return int(os.environ.get("SYRINX_SEEDVC_STEPS", "25"))
+        env = int(os.environ.get("SYRINX_SEEDVC_STEPS", "25"))
     except ValueError:
-        return 25
+        env = 25
+    try:
+        return int(settings.value("seedvc_steps", env))
+    except (TypeError, ValueError):
+        return env
 
 
 class SeedVCBackend:

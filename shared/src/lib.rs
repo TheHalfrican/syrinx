@@ -231,6 +231,12 @@ pub trait Engine {
     /// Make a model the active one for its category; returns the category.
     fn set_active_model(&self, model_id: &str) -> zbus::Result<String>;
 
+    /// Persisted engine settings + effective values as JSON.
+    fn get_settings(&self) -> zbus::Result<String>;
+
+    /// Set one engine setting (JSON-encoded value; null clears it).
+    fn set_setting(&self, key: &str, value_json: &str) -> zbus::Result<()>;
+
     /// Cancel an in-flight generation.
     fn cancel(&self, gen_id: u32) -> zbus::Result<()>;
 
