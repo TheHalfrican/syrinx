@@ -760,7 +760,7 @@ export component AppWindow inherits Window {
     in-out property <int> vc-engine-index: 0;
     in-out property <string> vc-mode: "speech";  // "speech" | "music"
     // music mode = singing-capable engines only (Vevo2 joins here)
-    in property <[string]> vc-music-engine-names: ["Seed-VC (singing)"];
+    in property <[string]> vc-music-engine-names: ["Seed-VC (singing)", "Vevo2 (singing)"];
     in-out property <int> vc-music-engine-index: 0;
     in-out property <int> vc-octave-index: 2;    // 0..4 → −2..+2 octaves (♫ register shift)
     in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)

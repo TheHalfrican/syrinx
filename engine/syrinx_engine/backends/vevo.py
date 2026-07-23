@@ -91,21 +91,15 @@ class VevoTimbreBackend:
     def invalidate_profile(self, profile_id: str) -> None:
         (self._voices_dir / f"{profile_id}_cbxref.wav").unlink(missing_ok=True)
 
-    async def convert(self, source_wav: str, profile) -> tuple[bytes, int]:
-        """Re-render *source_wav* in *profile*'s timbre; (pcm_f32_bytes, rate)."""
-        self.check_source(source_wav)
-        ref = combined_ref_wav(profile, self._voices_dir)
+    async def _request(self, payload: dict, on_stage=None) -> tuple[bytes, int]:
+        """One worker round-trip; interim {"stage": …} lines hit *on_stage*."""
         async with self._lock:
             await self._ensure_worker()
             self._req_id += 1
             rid = self._req_id
-            payload = json.dumps({
-                "id": rid, "source": str(source_wav), "target": ref,
-                "steps": _steps(),
-            }) + "\n"
-            self._proc.stdin.write(payload.encode())
+            payload = dict(payload, id=rid)
+            self._proc.stdin.write((json.dumps(payload) + "\n").encode())
             await self._proc.stdin.drain()
-            log.info("convert [%s] -> profile %s", self.engine_name, profile.id)
             while True:
                 line = await self._proc.stdout.readline()
                 if not line:
@@ -121,6 +115,10 @@ class VevoTimbreBackend:
                 if resp.get("id") != rid:
                     log.debug("vevo stale reply %s (want %s)", resp.get("id"), rid)
                     continue
+                if "stage" in resp:
+                    if on_stage:
+                        on_stage(resp["stage"])
+                    continue
                 break
         if not resp.get("ok"):
             raise RuntimeError(f"Vevo conversion failed: {resp.get('error')}")
@@ -129,3 +127,26 @@ class VevoTimbreBackend:
         pcm = raw_path.read_bytes()
         raw_path.unlink(missing_ok=True)
         return pcm, rate
+
+    async def convert(self, source_wav: str, profile) -> tuple[bytes, int]:
+        """Re-render *source_wav* in *profile*'s timbre; (pcm_f32_bytes, rate)."""
+        self.check_source(source_wav)
+        ref = combined_ref_wav(profile, self._voices_dir)
+        log.info("convert [%s] -> profile %s", self.engine_name, profile.id)
+        return await self._request({
+            "source": str(source_wav), "target": ref, "steps": _steps(),
+        })
+
+    async def convert_music(
+        self, source_wav: str, profile, *, on_stage=None, semitone: int = 0
+    ) -> tuple[bytes, int]:
+        """Song cover via Vevo2: demucs vocal split → singing conversion →
+        remix over the instrumental. Rides this same worker as a request
+        mode; stage names stream to *on_stage* as it progresses."""
+        self.check_source(source_wav)
+        ref = combined_ref_wav(profile, self._voices_dir)
+        log.info("convert-music [%s/vevo2] -> profile %s", self.engine_name, profile.id)
+        return await self._request({
+            "cmd": "music", "source": str(source_wav), "target": ref,
+            "steps": _steps(), "semitone": semitone,
+        }, on_stage=on_stage)

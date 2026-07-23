@@ -267,6 +267,19 @@ class EngineInterface(ServiceInterface):
                 name = f"{prof.name} ♫" if music else prof.name
                 title = f"{name} · {label.strip()}" if label.strip() else name
                 clip_id = ""
+                # conversion recipe — Regenerate re-runs this instead of
+                # re-speaking the transcript; mtime/size pin the exact source
+                # take (scratch recordings get overwritten by the next ◉)
+                try:
+                    st = Path(audio_path).stat()
+                    vc_json = json.dumps({
+                        "source": str(audio_path), "engine": be.engine_name,
+                        "mode": mode, "semitones": semitones,
+                        "label": label.strip(),
+                        "mtime": int(st.st_mtime), "size": st.st_size,
+                    })
+                except OSError:
+                    vc_json = ""
                 try:
                     item = self._history.save_clip(
                         voice_id=profile_id,
@@ -277,6 +290,7 @@ class EngineInterface(ServiceInterface):
                         sample_rate=rate,
                         engine=be.engine_name,
                         language=prof.language or "en",
+                        vc_json=vc_json,
                     )
                     clip_id = item.id
                 except Exception:  # noqa: BLE001
@@ -716,8 +730,42 @@ class EngineInterface(ServiceInterface):
 
     @method()
     async def RegenerateHistory(self, hid: "s") -> "u":  # noqa: F821
+        """Re-run the generation behind a history row. TTS rows re-speak
+        their text; conversion rows re-run the conversion — but only while
+        the exact source take still exists (0 when it's gone or overwritten,
+        so the app can say why instead of re-speaking the transcript)."""
         item = self._history.get(hid)
         if item is None:
+            return 0
+        vc = {}
+        if item.vc_json:
+            try:
+                vc = json.loads(item.vc_json)
+            except json.JSONDecodeError:
+                vc = {}
+        if vc:
+            src = vc.get("source", "")
+            try:
+                st = Path(src).stat()
+                fresh = (
+                    int(st.st_mtime) == int(vc.get("mtime", -1))
+                    and st.st_size == int(vc.get("size", -1))
+                )
+            except OSError:
+                fresh = False
+            if not fresh:
+                log.warning("regenerate %s: conversion source gone/overwritten (%s)", hid, src)
+                return 0
+            return self._start_convert(
+                src, item.voice_id, vc.get("engine", ""), vc.get("label", ""),
+                item.text, vc.get("mode", "speech"), int(vc.get("semitones", 0)),
+            )
+        from .tts import VC_ENGINES
+
+        if item.engine in VC_ENGINES:
+            # conversion row from before recipes were stored — refusing beats
+            # re-speaking its transcript through a TTS engine
+            log.warning("regenerate %s: pre-recipe conversion row", hid)
             return 0
         return self._start_speak(item.text, item.voice_id)
 

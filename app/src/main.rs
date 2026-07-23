@@ -20,7 +20,7 @@ enum Cmd {
     Play { id: String },
     Star { id: String, on: bool },
     Delete { id: String },
-    Regenerate { id: String },
+    Regenerate { id: String, is_vc: bool, is_music: bool },
     Pause,
     Resume,
     Seek { id: String, pct: f64 },
@@ -295,9 +295,33 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         ui.on_regen_hist(move |id| {
             let ui = ui_weak.unwrap();
-            ui.set_generating(true);
-            ui.set_synthesizing(true);
-            let _ = tx.send(Cmd::Regenerate { id: id.to_string() });
+            // conversion rows re-CONVERT (⇄ status), not re-speak (composer
+            // spinner) — look the row up to route the busy state correctly
+            let (mut is_vc, mut is_music) = (false, false);
+            let hist = ui.get_history();
+            for i in 0..hist.row_count() {
+                if let Some(h) = hist.row_data(i) {
+                    if h.id == id {
+                        is_vc = h.meta.starts_with("⇄ VC");
+                        is_music = h
+                            .voice
+                            .split(" · ")
+                            .next()
+                            .map(|s| s.trim_end().ends_with('♫'))
+                            .unwrap_or(false);
+                        break;
+                    }
+                }
+            }
+            if is_vc {
+                ui.set_vc_busy(true);
+                ui.set_vc_error("".into());
+                ui.set_vc_status("starting…".into());
+            } else {
+                ui.set_generating(true);
+                ui.set_synthesizing(true);
+            }
+            let _ = tx.send(Cmd::Regenerate { id: id.to_string(), is_vc, is_music });
         });
     }
     {
@@ -1136,7 +1160,7 @@ fn is_vc_engine(engine: &str) -> bool {
 /// Conversion-model ids, index-aligned with the vc-engine-names dropdown.
 const VC_ENGINE_IDS: &[&str] = &["chatterbox_vc", "seed_vc", "vevo_timbre"];
 /// Music-mode ids, index-aligned with vc-music-engine-names (singing-capable).
-const VC_MUSIC_ENGINE_IDS: &[&str] = &["seed_vc"];
+const VC_MUSIC_ENGINE_IDS: &[&str] = &["seed_vc", "vevo_timbre"];
 
 fn build_history(json: &str) -> Vec<HistItem> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
@@ -1691,7 +1715,8 @@ fn lib_engine_label(engine: &str) -> &str {
 }
 
 /// Model-filter options per type-dropdown index (0=All, 1=TTS, 2=speech VC,
-/// 3=music). Music lists the singing-capable engines (Vevo2 joins later).
+/// 3=music). Music lists the singing-capable engines (Seed-VC and Vevo —
+/// whose ♫ requests run Vevo2 in the same worker).
 fn lib_engines_for_type(type_idx: i32) -> Vec<&'static str> {
     match type_idx {
         1 => vec!["kokoro", "qwen", "qwen_custom_voice", "luxtts",
@@ -2628,11 +2653,38 @@ async fn worker(
                         lib_apply(&ui, &lib_rows, &lib_voices, &lib_filters);
                     }
                 }
-                Some(Cmd::Regenerate { id }) => {
+                Some(Cmd::Regenerate { id, is_vc, is_music }) => {
                     match proxy.regenerate_history(&id).await {
-                        Ok(gid) if gid != 0 => current_gen = gid,
-                        Ok(_) => {}
-                        Err(e) => tracing::error!("regenerate_history failed: {e}"),
+                        Ok(gid) if gid != 0 => {
+                            current_gen = gid;
+                            if is_vc {
+                                pending_vc = gid;
+                                pending_vc_music = is_music;
+                            }
+                        }
+                        Ok(_) => {
+                            // engine refused — for a conversion that means the
+                            // exact source take no longer exists
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_generating(false);
+                                ui.set_synthesizing(false);
+                                if is_vc {
+                                    ui.set_vc_busy(false);
+                                    ui.set_vc_status("".into());
+                                    ui.set_vc_error(
+                                        "can't regenerate — the source take was overwritten or deleted; re-arm a source and convert again".into(),
+                                    );
+                                }
+                            }).ok();
+                        }
+                        Err(e) => {
+                            tracing::error!("regenerate_history failed: {e}");
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_generating(false);
+                                ui.set_synthesizing(false);
+                                if is_vc { ui.set_vc_busy(false); ui.set_vc_status("".into()); }
+                            }).ok();
+                        }
                     }
                 }
                 Some(Cmd::Pause) => { proxy.pause_playback().await.ok(); }

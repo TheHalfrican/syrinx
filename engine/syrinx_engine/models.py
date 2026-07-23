@@ -147,6 +147,19 @@ CATALOG: list = [
               gpu_recommended=True, min_ram_gb=8.0, supported=True,
               patterns=["tokenizer/vq8192/*", "acoustic_modeling/Vq8192ToMels/*",
                         "acoustic_modeling/Vocoder/*"]),
+    # FM-only subset of RMSnow/Vevo2 — keep patterns in sync with
+    # vevo_worker.py's VEVO2_PATTERNS (the 6+ GB AR stacks never load)
+    ModelSpec("vevo2-singing", "Vevo2 (singing)", "vc", "vevo_timbre", "",
+              ["RMSnow/Vevo2"], 2970,
+              "Amphion's Vevo2 singing converter — the alternative ♫ engine "
+              "(Seed-VC articulates lyrics better and stays the default); "
+              "first conversion also fetches whisper-medium (~1.5 GB). "
+              "Isolated venv: run engine/setup-vevo.sh once. "
+              "Non-commercial weights.",
+              gpu_recommended=True, min_ram_gb=8.0, supported=True,
+              patterns=["tokenizer/contentstyle_fvq16384_12.5hz/*",
+                        "acoustic_modeling/fm_emilia101k_singnet7k_repa/*",
+                        "vocoder/*"]),
 ]
 
 _BY_ID = {m.id: m for m in CATALOG}

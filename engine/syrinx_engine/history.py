@@ -37,6 +37,10 @@ class HistoryItem:
     starred: bool
     created_at: float
     tags: list = None  # user-defined labels (the Library filters on these)
+    # conversion recipe (JSON: source/engine/mode/semitones/label + source
+    # mtime/size) — lets Regenerate re-run the conversion instead of
+    # re-speaking the transcript; "" for plain TTS rows
+    vc_json: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -88,10 +92,12 @@ class HistoryStore:
                 );
                 """
             )
-            # migrate rows created before tags existed
+            # migrate rows created before tags / vc_json existed
             cols = [r[1] for r in c.execute("PRAGMA table_info(history)")]
             if "tags" not in cols:
                 c.execute("ALTER TABLE history ADD COLUMN tags TEXT DEFAULT ''")
+            if "vc_json" not in cols:
+                c.execute("ALTER TABLE history ADD COLUMN vc_json TEXT DEFAULT ''")
 
     def _rel(self, p: Path) -> str:
         return str(p.relative_to(self._dir))
@@ -111,6 +117,7 @@ class HistoryStore:
         sample_rate: int,
         engine: str = "",
         language: str = "en",
+        vc_json: str = "",
     ) -> HistoryItem:
         hid = uuid.uuid4().hex[:12]
         dest = self._audio_dir / f"{hid}.wav"
@@ -120,11 +127,12 @@ class HistoryStore:
         with self._conn() as c:
             c.execute(
                 "INSERT INTO history(id,voice_id,voice_name,text,audio_path,engine,"
-                "language,duration,starred,created_at) VALUES(?,?,?,?,?,?,?,?,0,?)",
-                (hid, voice_id, voice_name, text, rel, engine, language, duration, created),
+                "language,duration,starred,created_at,vc_json) VALUES(?,?,?,?,?,?,?,?,0,?,?)",
+                (hid, voice_id, voice_name, text, rel, engine, language, duration, created, vc_json),
             )
         return HistoryItem(
-            hid, voice_id, voice_name, text, rel, engine, language, duration, False, created
+            hid, voice_id, voice_name, text, rel, engine, language, duration, False, created,
+            vc_json=vc_json,
         )
 
     @staticmethod
@@ -157,6 +165,7 @@ class HistoryStore:
             starred=bool(r["starred"]),
             created_at=r["created_at"] or 0.0,
             tags=tags if isinstance(tags, list) else [],
+            vc_json=r["vc_json"] or "",
         )
 
     def list(self) -> list[HistoryItem]:

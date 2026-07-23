@@ -47,11 +47,16 @@ fi
     librosa soundfile encodec unidecode json5 ruamel.yaml tqdm \
     onnxruntime 'setuptools<81' safetensors openai-whisper phonemizer g2p_en \
     ipython \
-    pyworld einops
+    pyworld einops \
+    demucs torchvision praat-parselmouth torchcrepe
 # ipython: vevo_utils has a notebook-era top-level IPython import.
 # pyworld/einops: pulled by Amphion codec modules vevo_utils imports.
 # setuptools<81: pyworld's __init__ imports pkg_resources, removed in newer
 # setuptools (same pin as the main venv's resemble-perth).
+# demucs/torchvision: ♫ music mode — demucs splits the vocal stem and
+# Vevo2's vevo2_utils has a top-level torchvision import.
+# parselmouth/torchcrepe: vevo2_utils → evaluation.metrics.f0 → utils.f0,
+# both undeclared by Amphion (the setup-time import below proves the set).
 
 SYRINX_VEVO_AMPHION="$AMPHION_DIR" .venv-vevo/bin/python - <<'EOF'
 import os
@@ -61,7 +66,9 @@ amphion = os.environ["SYRINX_VEVO_AMPHION"]
 os.chdir(amphion)
 sys.path.insert(0, amphion)
 import torch
+from demucs.api import Separator  # noqa: F401 — ♫ music mode's stem splitter
 from models.vc.vevo.vevo_utils import VevoInferencePipeline  # noqa: F401
+from models.svc.vevo2.vevo2_utils import Vevo2InferencePipeline  # noqa: F401 — ♫
 
 print(
     "vevo venv OK · torch", torch.__version__,
