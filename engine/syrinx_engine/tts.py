@@ -34,6 +34,10 @@ CLONING_ENGINES = {"qwen", "luxtts", "chatterbox", "chatterbox_turbo", "tada"}
 # Preset engines beyond the always-on builtin whose voices are listed only
 # while they're the active voice model (Models-tab "Use").
 EXTRA_PRESET_ENGINES = {"qwen_custom_voice"}
+# Voice-conversion engines (the ⇄ tab) — audio→audio, never in the voice
+# list. Phase 2 adds seed_vc / vevo_timbre / vevo2 here.
+VC_ENGINES = {"chatterbox_vc"}
+DEFAULT_VC_ENGINE = "chatterbox_vc"
 
 
 class SpeechSynthesizer:
@@ -101,6 +105,22 @@ class SpeechSynthesizer:
     @property
     def clone_engine(self) -> str:
         return self._clone_engine or DEFAULT_CLONE_ENGINE
+
+    def vc_backend(self, engine: str = ""):
+        """Voice-conversion backend (ConvertVoice). Lives in the shared
+        backend dict, so the Models-tab eviction sweep reclaims its VRAM
+        too; it reloads lazily on the next convert."""
+        engine = engine or DEFAULT_VC_ENGINE
+        if engine not in VC_ENGINES:
+            raise ValueError(
+                f"unknown VC engine {engine!r} "
+                f"(expected: {', '.join(sorted(VC_ENGINES))})"
+            )
+        if engine not in self._backends:
+            from .backends.chatterbox_vc import ChatterboxVCBackend
+
+            self._backends[engine] = ChatterboxVCBackend()
+        return self._backends[engine]
 
     def _be(self, engine: str):
         if engine not in self._backends:

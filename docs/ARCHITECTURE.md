@@ -50,6 +50,11 @@ and `syrinx-dictate` build against it. Summary by area:
 - **TTS / STT**: `Speak`, `Transcribe` (sync, short clips),
   `TranscribeFile → req_id` (async; partials via `TranscribeProgress`, final via
   `TranscribeResult`), `ListVoices`, `Cancel`.
+- **Voice conversion**: `ConvertVoice(audio_path, profile_id, engine) → gen_id` —
+  style-preserved VC (the source's words/timing/prosody survive; only the timbre
+  changes). Engine `""` = `chatterbox_vc` (Resemble's S3 tokenizer + S3Gen, the
+  same `ResembleAI/chatterbox` weights the TTS backend uses). Progress/errors via
+  `GenerationProgress`; the result auto-plays and lands in history like `Speak`.
 - **Profiles**: create / list / get / update / delete, `AddSample`,
   `UpdateSampleText`, `SetProfileAvatar`, `ExportProfile` / `ImportProfile`
   (portable zips), `CloneVoice`.

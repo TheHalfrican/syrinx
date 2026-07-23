@@ -7,6 +7,7 @@ Keep ML logic out of here.
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 from dbus_next.service import ServiceInterface, method, signal, dbus_property
 from dbus_next.constants import PropertyAccess
@@ -206,6 +207,72 @@ class EngineInterface(ServiceInterface):
 
         asyncio.create_task(run())
         return req_id
+
+    @method()
+    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s") -> "u":  # noqa: F821
+        """Style-preserved voice conversion (the ⇄ tab): re-render the speech
+        in *audio_path* with a cloned profile's voice, keeping the source's
+        delivery (words/timing/prosody — only the timbre changes). *engine*
+        "" = the default (chatterbox_vc). Returns a generation id; progress
+        and errors arrive via GenerationProgress, and the result auto-plays
+        and lands in history exactly like Speak."""
+        return self._start_convert(audio_path, profile_id, engine)
+
+    def _start_convert(self, audio_path: str, profile_id: str, engine: str) -> int:
+        gen_id = self._next_gen_id
+        self._next_gen_id += 1
+
+        async def run() -> None:
+            try:
+                self.SpeakStarted(gen_id)
+                prof = self._profiles.get(profile_id)
+                if prof is None:
+                    raise ValueError(f"unknown profile {profile_id!r}")
+                if prof.voice_type != "cloned" or not prof.samples:
+                    raise ValueError(
+                        f"{prof.name} has no reference samples to convert to"
+                    )
+                be = self._tts.vc_backend(engine)
+                be.check_source(audio_path)  # cheap cap check before any load
+                self.GenerationProgress(gen_id, "loading model", 0.0)
+                await be.load()
+                self.GenerationProgress(gen_id, "converting", 0.3)
+                pcm, rate = await be.convert(audio_path, prof)
+                duration = audio.duration_of(pcm, rate)
+                clip_id = ""
+                try:
+                    item = self._history.save_clip(
+                        voice_id=profile_id,
+                        voice_name=prof.name,
+                        text=f"[voice conversion] {Path(audio_path).name}",
+                        pcm=pcm,
+                        sample_rate=rate,
+                        engine=be.engine_name,
+                        language=prof.language or "en",
+                    )
+                    clip_id = item.id
+                except Exception:  # noqa: BLE001
+                    log.exception("history save failed for convert %d", gen_id)
+                self.GenerationProgress(gen_id, "playing", 1.0)
+                bars = json.dumps(audio.envelope(pcm))
+                await self._play(
+                    gen_id, pcm, rate,
+                    on_start=lambda: self.PlaybackInfo(
+                        gen_id, clip_id, prof.name, duration, bars
+                    ),
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                log.exception("ConvertVoice %d failed", gen_id)
+                self.GenerationProgress(gen_id, f"error: {str(e)[:200]}", 0.0)
+            finally:
+                self.SpeakEnded(gen_id)
+                self._tasks.pop(gen_id, None)
+
+        task = asyncio.create_task(run())
+        self._tasks[gen_id] = task
+        return gen_id
 
     @method()
     async def ListVoices(self) -> "a(ss)":  # noqa: F821

@@ -58,6 +58,11 @@ enum Cmd {
     TrRefine { text: String },
     TrSaveCapture { id: String, text: String },
     TrDeleteCapture { id: String },
+    // voice changer (⇄ tab)
+    VcLoad,
+    VcToggleRecord { system: bool },
+    VcPickFile,
+    VcConvert { index: usize },
     // voices tab (profile table + inspector)
     VoicesLoad,
     VoicesSearch { q: String },
@@ -402,6 +407,27 @@ fn main() -> anyhow::Result<()> {
                 ui.set_tr_status("refining…".into());
                 let _ = tx.send(Cmd::TrRefine { text });
             }
+        });
+    }
+    // Voice changer (⇄ tab).
+    {
+        let tx = tx.clone();
+        ui.on_vc_open(move || { let _ = tx.send(Cmd::VcLoad); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vc_toggle_record(move |mode| {
+            let _ = tx.send(Cmd::VcToggleRecord { system: mode.as_str() == "system" });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vc_pick_file(move || { let _ = tx.send(Cmd::VcPickFile); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vc_convert(move |i| {
+            let _ = tx.send(Cmd::VcConvert { index: i.max(0) as usize });
         });
     }
     // Captures (persisted transcripts): save-or-update decided by tr-capture-id.
@@ -1500,6 +1526,16 @@ async fn worker(
     const TR_REC_MAX: u32 = 600; // 10 min safety cap
     let mut pending_tr: u32 = 0;
     let mut pending_tr_refine: u32 = 0;
+    // voice-changer (⇄) view state
+    let mut vc_rec: Option<tokio::process::Child> = None;
+    let mut vc_elapsed: u32 = 0;
+    let vc_wav = std::env::var("XDG_RUNTIME_DIR")
+        .map(|d| format!("{d}/syrinx-convert.wav"))
+        .unwrap_or_else(|_| "/tmp/syrinx-convert.wav".into());
+    const VC_REC_MAX: u32 = 180; // matches the engine's SYRINX_VC_MAX_SECS default
+    let mut vc_source: Option<String> = None;       // armed source path
+    let mut vc_voice_ids: Vec<String> = Vec::new(); // parallel to the dropdown names
+    let mut pending_vc: u32 = 0;                    // in-flight conversion gen id
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -1518,9 +1554,30 @@ async fn worker(
             }
             Some(sig) = gprog.next() => {
                 if let Ok(a) = sig.args() {
+                    // conversions report to the ⇄ tab, not the composer
+                    let is_vc = pending_vc != 0 && a.gen_id == pending_vc;
                     if let Some(msg) = a.state.strip_prefix("error:") {
                         let msg = msg.trim().to_string();
-                        ui.upgrade_in_event_loop(move |ui| ui.set_gen_error(msg.into())).ok();
+                        ui.upgrade_in_event_loop(move |ui| {
+                            if is_vc {
+                                ui.set_vc_busy(false);
+                                ui.set_vc_status("".into());
+                                ui.set_vc_error(msg.into());
+                            } else {
+                                ui.set_gen_error(msg.into());
+                            }
+                        }).ok();
+                    } else if is_vc {
+                        let stage: SharedString = match a.state.as_str() {
+                            "loading model" => "loading model…".into(),
+                            "converting" => "converting…".into(),
+                            "playing" => "done — playing · saved to History".into(),
+                            s => s.into(),
+                        };
+                        ui.upgrade_in_event_loop(move |ui| {
+                            if stage.starts_with("done") { ui.set_vc_busy(false); }
+                            ui.set_vc_status(stage);
+                        }).ok();
                     }
                 }
             }
@@ -1643,6 +1700,16 @@ async fn worker(
             Some(sig) = ended.next() => {
                 let is_current = sig.args().map(|a| a.gen_id == current_play_gen).unwrap_or(false);
                 if is_current { playing = false; }
+                // conversion ran its course (played out or errored) — settle the ⇄ tab
+                if pending_vc != 0 && sig.args().map(|a| a.gen_id == pending_vc).unwrap_or(false) {
+                    pending_vc = 0;
+                    ui.upgrade_in_event_loop(|ui| {
+                        ui.set_vc_busy(false);
+                        if ui.get_vc_status().starts_with("done") {
+                            ui.set_vc_status("done · saved to History".into());
+                        }
+                    }).ok();
+                }
                 // sample audition ran to its end (or was replaced) -> flip ■ back to ▶
                 let sample_done = sample_gen != 0
                     && sig.args().map(|a| a.gen_id == sample_gen).unwrap_or(false);
@@ -1676,7 +1743,29 @@ async fn worker(
                     }
                 }
             }
-            _ = rec_interval.tick(), if cv_rec.is_some() || tr_rec.is_some() => {
+            _ = rec_interval.tick(), if cv_rec.is_some() || tr_rec.is_some() || vc_rec.is_some() => {
+                if vc_rec.is_some() {
+                    vc_elapsed += 1;
+                    if vc_elapsed >= VC_REC_MAX {
+                        // engine caps conversion sources — stop and keep the clip
+                        if let Some(mut child) = vc_rec.take() {
+                            stop_pw_record(&mut child).await;
+                            vc_source = Some(vc_wav.clone());
+                            let label = format!("{} · stopped at the 3:00 cap", recorded_label(&vc_wav));
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_vc_recording(false);
+                                ui.set_vc_has_source(true);
+                                ui.set_vc_source_label(label.into());
+                                ui.set_vc_status("".into());
+                            }).ok();
+                        }
+                    } else {
+                        let e = vc_elapsed;
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_vc_status(format!("● recording {}:{:02} / 3:00", e / 60, e % 60).into());
+                        }).ok();
+                    }
+                }
                 if tr_rec.is_some() {
                     tr_elapsed += 1;
                     if tr_elapsed >= TR_REC_MAX {
@@ -2460,6 +2549,116 @@ async fn worker(
                             }).ok();
                         }
                         Err(e) => tracing::error!("delete capture failed: {e}"),
+                    }
+                }
+                Some(Cmd::VcLoad) => {
+                    // target dropdown = cloned profiles that have reference samples
+                    let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
+                    let profs: Vec<serde_json::Value> = serde_json::from_str(&pj).unwrap_or_default();
+                    vc_voice_ids.clear();
+                    let mut names: Vec<SharedString> = Vec::new();
+                    for p in &profs {
+                        let cloned = p.get("voice_type").and_then(|v| v.as_str()) == Some("cloned");
+                        let samples = p.get("samples").and_then(|v| v.as_i64()).unwrap_or(0);
+                        if cloned && samples > 0 {
+                            if let (Some(id), Some(name)) = (
+                                p.get("id").and_then(|v| v.as_str()),
+                                p.get("name").and_then(|v| v.as_str()),
+                            ) {
+                                vc_voice_ids.push(id.to_string());
+                                names.push(name.into());
+                            }
+                        }
+                    }
+                    let count = names.len() as i32;
+                    ui.upgrade_in_event_loop(move |ui| {
+                        if ui.get_vc_voice_index() >= count { ui.set_vc_voice_index(0); }
+                        ui.set_vc_voice_names(ModelRc::from(Rc::new(VecModel::from(names))));
+                    }).ok();
+                }
+                Some(Cmd::VcToggleRecord { system }) => {
+                    if let Some(mut child) = vc_rec.take() {
+                        // stop → arm the clip as the conversion source
+                        stop_pw_record(&mut child).await;
+                        if wav_rms(&vc_wav).map(|r| r < 0.006).unwrap_or(true) {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_vc_recording(false);
+                                ui.set_vc_status("⚠ capture was silent — check the input device".into());
+                            }).ok();
+                        } else {
+                            vc_source = Some(vc_wav.clone());
+                            let e = vc_elapsed;
+                            let label = format!("recorded clip · {}:{:02}", e / 60, e % 60);
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_vc_recording(false);
+                                ui.set_vc_has_source(true);
+                                ui.set_vc_source_label(label.into());
+                                ui.set_vc_status("".into());
+                            }).ok();
+                        }
+                    } else {
+                        let device = if system { default_monitor().await } else { None };
+                        if system && device.is_none() {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_vc_status("no default sink monitor found".into());
+                            }).ok();
+                        } else {
+                            match start_pw_record(&vc_wav, device.as_deref()).await {
+                                Ok(child) => {
+                                    vc_rec = Some(child);
+                                    vc_elapsed = 0;
+                                    let mode = if system { "system" } else { "mic" };
+                                    ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_vc_has_source(false);
+                                        ui.set_vc_source_label("".into());
+                                        ui.set_vc_error("".into());
+                                        ui.set_vc_rec_mode(mode.into());
+                                        ui.set_vc_recording(true);
+                                        ui.set_vc_status("● recording 0:00 / 3:00".into());
+                                    }).ok();
+                                }
+                                Err(e) => tracing::error!("record failed: {e}"),
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::VcPickFile) => {
+                    if let Some(handle) = rfd::AsyncFileDialog::new()
+                        .add_filter("Audio", &["wav", "mp3", "flac", "ogg", "m4a", "opus", "webm"])
+                        .pick_file()
+                        .await
+                    {
+                        let name = handle.file_name();
+                        vc_source = Some(handle.path().to_string_lossy().to_string());
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_vc_has_source(true);
+                            ui.set_vc_source_label(name.into());
+                            ui.set_vc_error("".into());
+                            ui.set_vc_status("".into());
+                        }).ok();
+                    }
+                }
+                Some(Cmd::VcConvert { index }) => {
+                    if let (Some(src), Some(pid)) =
+                        (vc_source.clone(), vc_voice_ids.get(index).cloned())
+                    {
+                        match proxy.convert_voice(&src, &pid, "").await {
+                            Ok(gid) if gid != 0 => {
+                                pending_vc = gid;
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_vc_busy(true);
+                                    ui.set_vc_error("".into());
+                                    ui.set_vc_status("starting…".into());
+                                }).ok();
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::error!("convert failed: {e}");
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_vc_status("engine unavailable".into());
+                                }).ok();
+                            }
+                        }
                     }
                 }
                 Some(Cmd::VoicesLoad) => {

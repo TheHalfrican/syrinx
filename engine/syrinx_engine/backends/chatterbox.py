@@ -46,16 +46,12 @@ def _as_f32(wav) -> np.ndarray:
     return np.asarray(wav, dtype=np.float32).reshape(-1)
 
 
-def _patch_f32(model) -> None:
-    """Patch float64→float32 dtype mismatches in upstream chatterbox.
-
-    librosa.load returns float64; two upstream paths tensor-ify it without
-    casting and matmul against float32 weights (S3Tokenizer mel + VoiceEncoder).
-    """
+def _patch_f32_mel(tokenizer) -> None:
+    """float64→float32 cast on the S3Tokenizer mel path (also needed by the
+    VC backend, whose model has no VoiceEncoder — hence the split)."""
     import types
 
-    _tokzr = model.s3gen.tokenizer
-    _orig_log_mel = _tokzr.log_mel_spectrogram.__func__
+    _orig_log_mel = tokenizer.log_mel_spectrogram.__func__
 
     def _f32_log_mel(self_tokzr, audio, padding=0):
         import torch as _torch
@@ -64,7 +60,18 @@ def _patch_f32(model) -> None:
             audio = audio.float()
         return _orig_log_mel(self_tokzr, audio, padding)
 
-    _tokzr.log_mel_spectrogram = types.MethodType(_f32_log_mel, _tokzr)
+    tokenizer.log_mel_spectrogram = types.MethodType(_f32_log_mel, tokenizer)
+
+
+def _patch_f32(model) -> None:
+    """Patch float64→float32 dtype mismatches in upstream chatterbox.
+
+    librosa.load returns float64; two upstream paths tensor-ify it without
+    casting and matmul against float32 weights (S3Tokenizer mel + VoiceEncoder).
+    """
+    import types
+
+    _patch_f32_mel(model.s3gen.tokenizer)
 
     _ve = model.ve
     _orig_ve_forward = _ve.forward.__func__

@@ -88,6 +88,13 @@ pub trait Engine {
     /// Partials stream via `TranscribeProgress`; final text via `TranscribeResult`.
     fn transcribe_file(&self, audio_path: &str) -> zbus::Result<u32>;
 
+    /// Style-preserved voice conversion: re-render the speech in `audio_path`
+    /// with a cloned profile's voice, keeping the source delivery (only the
+    /// timbre changes). `engine` "" = the default (chatterbox_vc). Returns a
+    /// generation id; progress/errors arrive via `GenerationProgress`, and the
+    /// result auto-plays and lands in history like Speak.
+    fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str) -> zbus::Result<u32>;
+
     /// Delete a reference sample.
     fn delete_sample(&self, sample_id: &str) -> zbus::Result<()>;
 

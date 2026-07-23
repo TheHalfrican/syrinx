@@ -581,6 +581,16 @@ export component AppWindow inherits Window {
     in property <string> tr-status;
     in property <[CaptureItem]> captures;      // persisted transcripts (text only)
     in-out property <string> tr-capture-id;    // loaded capture ("" = unsaved)
+    // --- voice changer (⇄ vc) view ---
+    in property <bool> vc-recording;
+    in property <string> vc-rec-mode: "mic";   // which source is live
+    in property <bool> vc-busy;                // conversion in flight
+    in property <string> vc-status;
+    in property <string> vc-source-label;      // armed source description
+    in property <bool> vc-has-source: false;
+    in property <string> vc-error: "";
+    in property <[string]> vc-voice-names: []; // cloned profiles with samples
+    in-out property <int> vc-voice-index: 0;
     // --- delete-voice confirm ---
     in-out property <string> del-id: "";
     in-out property <string> del-name: "";
@@ -694,6 +704,10 @@ export component AppWindow inherits Window {
     callback crop-done(bool);   // accepted?
     callback tr-toggle-record(string);  // "mic" | "system"
     callback tr-pick-file();
+    callback vc-open();                 // refresh the target-voice list
+    callback vc-toggle-record(string);  // "mic" | "system"
+    callback vc-pick-file();
+    callback vc-convert(int);           // index into vc-voice-names
     callback tr-refine();
     callback tr-save-capture();         // save new or update the loaded one
     callback tr-delete-capture(string); // capture id
@@ -767,7 +781,7 @@ export component AppWindow inherits Window {
                         hover-changed(on, y) => { nav-tip = on ? "Voices" : ""; nav-tip-y = y; } } }
                     HorizontalLayout { alignment: center; NavIcon { glyph: "☰"; active: tab == "stt"; clicked => { tab = "stt"; }
                         hover-changed(on, y) => { nav-tip = on ? "Transcription" : ""; nav-tip-y = y; } } }
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "⇄"; active: tab == "vc"; clicked => { tab = "vc"; }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "⇄"; active: tab == "vc"; clicked => { tab = "vc"; root.vc-open(); }
                         hover-changed(on, y) => { nav-tip = on ? "Voice Changer" : ""; nav-tip-y = y; } } }
                     HorizontalLayout { alignment: center; NavIcon { glyph: "▤"; active: tab == "lib"; clicked => { tab = "lib"; }
                         hover-changed(on, y) => { nav-tip = on ? "Library" : ""; nav-tip-y = y; } } }
@@ -792,6 +806,7 @@ export component AppWindow inherits Window {
                                 text: tab == "tts" ? "Text to Speech"
                                     : tab == "stt" ? "Transcription"
                                     : tab == "voices" ? "Voices"
+                                    : tab == "vc" ? "Voice Changer"
                                     : (tab == "models" ? "Models" : "Coming soon");
                                 font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg;
                             }
@@ -799,6 +814,7 @@ export component AppWindow inherits Window {
                                 text: tab == "tts" ? "Type it, pick a voice, hear it — all local."
                                     : tab == "stt" ? "Record or import audio — whisper turns it into text."
                                     : tab == "voices" ? "Every profile in one place — inspect, audition, manage."
+                                    : tab == "vc" ? "Dub any recording with one of your voices — the delivery stays, the timbre changes."
                                     : (tab == "models" ? hardware-line : "This screen is stubbed for now.");
                                 font-size: 12px; color: Theme.name == "win95" ? #cfe6e6 : Theme.dim;
                             }
@@ -1579,8 +1595,103 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // ---- Voice Changer (style-preserved voice conversion) ----
+                    if tab == "vc" : VerticalLayout {
+                        padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 12px;
+                        // 1 — source
+                        Text { text: "1 · SOURCE AUDIO"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            TBtn {
+                                label: vc-recording && vc-rec-mode == "mic" ? "■ Stop" : "● Record mic";
+                                generate: vc-recording && vc-rec-mode == "mic";
+                                clicked => { if (!vc-busy) { root.vc-toggle-record("mic"); } }
+                            }
+                            TBtn {
+                                label: vc-recording && vc-rec-mode == "system" ? "■ Stop" : "◉ Record system";
+                                generate: vc-recording && vc-rec-mode == "system";
+                                clicked => { if (!vc-busy) { root.vc-toggle-record("system"); } }
+                            }
+                            TBtn {
+                                label: "⇪ Import audio…";
+                                clicked => { if (!vc-busy && !vc-recording) { root.vc-pick-file(); } }
+                            }
+                            Rectangle {}
+                            Text {
+                                text: vc-status; font-size: 11px; font-family: Theme.mono;
+                                color: Theme.dim; vertical-alignment: center;
+                            }
+                        }
+                        // armed source (history-card-style sunken box)
+                        Rectangle {
+                            height: 46px;
+                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                            border-radius: Theme.rad;
+                            background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                            HorizontalLayout {
+                                padding-left: 12px; padding-right: 12px;
+                                Text {
+                                    text: vc-has-source ? vc-source-label
+                                        : "No source yet — record or import the audio to convert.";
+                                    font-size: 12px; font-family: Theme.font;
+                                    color: vc-has-source ? Theme.fg : Theme.dim;
+                                    opacity: vc-has-source ? 1.0 : 0.6;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                            }
+                        }
+                        // 2 — target voice + convert
+                        Text { text: "2 · TARGET VOICE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            ThemedDropdown {
+                                horizontal-stretch: 1;
+                                model: vc-voice-names;
+                                current-index <=> vc-voice-index;
+                            }
+                            TBtn {
+                                label: vc-busy ? "…" : "⇄ Convert"; generate: true; min-width: 130px;
+                                clicked => {
+                                    if (!vc-busy && !vc-recording && vc-has-source && vc-voice-names.length > 0) {
+                                        root.vc-convert(vc-voice-index);
+                                    }
+                                }
+                            }
+                        }
+                        if vc-voice-names.length == 0 : Text {
+                            text: "No cloned voices yet — create one first (✦ Create voice in Text to Speech).";
+                            font-size: 11px; font-family: Theme.mono; color: Theme.dim;
+                        }
+                        // last conversion failure (composer error-line pattern:
+                        // elide + ⧉ copy; preferred-width 0 so it can't inflate)
+                        if vc-error != "" : HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: "⚠ " + vc-error;
+                                font-size: 10px; font-family: Theme.mono; color: #cc3b3b;
+                                overflow: elide; preferred-width: 0px;
+                                horizontal-stretch: 1; vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: 18px; height: 16px; border-radius: Theme.rad;
+                                background: vecta.has-hover ? Theme.acc-soft : transparent;
+                                vecti := TextInput { text: vc-error; read-only: true; opacity: 0; width: 1px; height: 1px; }
+                                vecta := TouchArea { clicked => { vecti.select-all(); vecti.copy(); } }
+                                Text { text: "⧉"; font-size: 10px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        Text {
+                            text: "The conversion keeps the original words, timing and delivery — only the voice changes. The result plays when ready and lands in History.";
+                            font-size: 11px; color: Theme.dim; wrap: word-wrap;
+                        }
+                        Rectangle {}
+                    }
+
                     // ---- stub for other tabs ----
-                    if tab != "tts" && tab != "models" && tab != "stt" : Rectangle {
+                    // whitelist of the still-stubbed tabs — the old exclusion
+                    // list silently kept rendering this above shipped views
+                    if tab == "lib" || tab == "settings" : Rectangle {
                         HorizontalLayout {
                             alignment: center;
                             VerticalLayout {
