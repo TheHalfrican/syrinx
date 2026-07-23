@@ -10,6 +10,7 @@ export struct VoiceItem {
 }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
 export struct CaptureItem { id: string, text: string, date: string }
+export struct SourceClipItem { id: string, name: string, meta: string }
 export struct ProfileRow {
     id: string, name: string, desc: string, lang: string, engine: string,
     samples: string, gens: string, avatar: image, has-avatar: bool,
@@ -591,6 +592,12 @@ export component AppWindow inherits Window {
     in property <string> vc-error: "";
     in property <[string]> vc-voice-names: []; // cloned profiles with samples
     in-out property <int> vc-voice-index: 0;
+    in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)
+    in property <string> vc-armed-id: "";      // saved clip armed as source ("" = scratch/import)
+    in property <bool> vc-armed-saved: false;  // hides "Save clip" when already stored
+    in property <string> vc-audition-id: "";   // clip id or "scratch" while auditioning
+    in-out property <string> vc-clip-name;     // save-as name input
+    in-out property <string> vc-result-name;   // history label for the conversion
     // --- delete-voice confirm ---
     in-out property <string> del-id: "";
     in-out property <string> del-name: "";
@@ -704,10 +711,14 @@ export component AppWindow inherits Window {
     callback crop-done(bool);   // accepted?
     callback tr-toggle-record(string);  // "mic" | "system"
     callback tr-pick-file();
-    callback vc-open();                 // refresh the target-voice list
+    callback vc-open();                 // refresh the target-voice + clip lists
     callback vc-toggle-record(string);  // "mic" | "system"
     callback vc-pick-file();
     callback vc-convert(int);           // index into vc-voice-names
+    callback vc-save-clip();            // persist the armed source (name from vc-clip-name)
+    callback vc-delete-clip(string);    // clip id
+    callback vc-arm-clip(string);       // clip id -> becomes the conversion source
+    callback vc-audition(string);       // clip id or "scratch" — toggles play/stop
     callback tr-refine();
     callback tr-save-capture();         // save new or update the loaded one
     callback tr-delete-capture(string); // capture id
@@ -1596,96 +1607,184 @@ export component AppWindow inherits Window {
                     }
 
                     // ---- Voice Changer (style-preserved voice conversion) ----
-                    if tab == "vc" : VerticalLayout {
-                        padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 12px;
-                        // 1 — source
-                        Text { text: "1 · SOURCE AUDIO"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            TBtn {
-                                label: vc-recording && vc-rec-mode == "mic" ? "■ Stop" : "● Record mic";
-                                generate: vc-recording && vc-rec-mode == "mic";
-                                clicked => { if (!vc-busy) { root.vc-toggle-record("mic"); } }
-                            }
-                            TBtn {
-                                label: vc-recording && vc-rec-mode == "system" ? "■ Stop" : "◉ Record system";
-                                generate: vc-recording && vc-rec-mode == "system";
-                                clicked => { if (!vc-busy) { root.vc-toggle-record("system"); } }
-                            }
-                            TBtn {
-                                label: "⇪ Import audio…";
-                                clicked => { if (!vc-busy && !vc-recording) { root.vc-pick-file(); } }
-                            }
-                            Rectangle {}
-                            Text {
-                                text: vc-status; font-size: 11px; font-family: Theme.mono;
-                                color: Theme.dim; vertical-alignment: center;
-                            }
-                        }
-                        // armed source (history-card-style sunken box)
-                        Rectangle {
-                            height: 46px;
-                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
-                            border-radius: Theme.rad;
-                            background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
-                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
-                            HorizontalLayout {
-                                padding-left: 12px; padding-right: 12px;
-                                Text {
-                                    text: vc-has-source ? vc-source-label
-                                        : "No source yet — record or import the audio to convert.";
-                                    font-size: 12px; font-family: Theme.font;
-                                    color: vc-has-source ? Theme.fg : Theme.dim;
-                                    opacity: vc-has-source ? 1.0 : 0.6;
-                                    vertical-alignment: center; overflow: elide;
-                                }
-                            }
-                        }
-                        // 2 — target voice + convert
-                        Text { text: "2 · TARGET VOICE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            ThemedDropdown {
-                                horizontal-stretch: 1;
-                                model: vc-voice-names;
-                                current-index <=> vc-voice-index;
-                            }
-                            TBtn {
-                                label: vc-busy ? "…" : "⇄ Convert"; generate: true; min-width: 130px;
-                                clicked => {
-                                    if (!vc-busy && !vc-recording && vc-has-source && vc-voice-names.length > 0) {
-                                        root.vc-convert(vc-voice-index);
+                    if tab == "vc" : HorizontalLayout {
+                        padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 14px;
+                        // saved source clips rail — click to arm, ▶ to audition
+                        VerticalLayout {
+                            width: 210px; spacing: 10px;
+                            Text { text: "SOURCE CLIPS"; font-size: 12px; font-weight: 700; color: Theme.dim; }
+                            ScrollView {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    for c in vc-clips : Rectangle {
+                                        // fixed height so the ScrollView scrolls
+                                        height: 58px;
+                                        border-width: Theme.name == "win95" ? 0px : 1px;
+                                        border-color: c.id == vc-armed-id ? Theme.acc : Theme.brd;
+                                        border-radius: Theme.rad;
+                                        background: c.id == vc-armed-id ? Theme.acc-soft : Theme.card-bg;
+                                        if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                        scta := TouchArea {
+                                            clicked => {
+                                                if (!vc-busy && !vc-recording) { root.vc-arm-clip(c.id); }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            padding: 10px; spacing: 4px;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                Text {
+                                                    text: c.name; font-size: 11.5px; font-weight: 700; color: Theme.fg;
+                                                    overflow: elide; horizontal-stretch: 1; vertical-alignment: center;
+                                                }
+                                                Rectangle {
+                                                    width: 18px; height: 18px; border-radius: Theme.rad;
+                                                    background: scplay.has-hover ? Theme.acc-soft : transparent;
+                                                    scplay := TouchArea { clicked => { root.vc-audition(c.id); } }
+                                                    Text {
+                                                        text: vc-audition-id == c.id ? "■" : "▶";
+                                                        font-size: 11px; color: vc-audition-id == c.id ? Theme.acc : Theme.dim;
+                                                        horizontal-alignment: center; vertical-alignment: center;
+                                                    }
+                                                }
+                                                Rectangle {
+                                                    width: 18px; height: 18px; border-radius: Theme.rad;
+                                                    background: scdel.has-hover ? Theme.acc-soft : transparent;
+                                                    scdel := TouchArea { clicked => { root.vc-delete-clip(c.id); } }
+                                                    Text { text: "✕"; font-size: 11px; color: Theme.dim;
+                                                           horizontal-alignment: center; vertical-alignment: center; }
+                                                }
+                                            }
+                                            Text { text: c.meta; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; }
+                                        }
+                                    }
+                                    if vc-clips.length == 0 : Text {
+                                        text: "— no saved clips yet —"; font-size: 10.5px; font-family: Theme.mono;
+                                        color: Theme.dim; horizontal-alignment: center;
                                     }
                                 }
                             }
                         }
-                        if vc-voice-names.length == 0 : Text {
-                            text: "No cloned voices yet — create one first (✦ Create voice in Text to Speech).";
-                            font-size: 11px; font-family: Theme.mono; color: Theme.dim;
-                        }
-                        // last conversion failure (composer error-line pattern:
-                        // elide + ⧉ copy; preferred-width 0 so it can't inflate)
-                        if vc-error != "" : HorizontalLayout {
-                            spacing: 6px;
+                        // workspace column
+                        VerticalLayout {
+                            spacing: 12px; horizontal-stretch: 1;
+                            // 1 — source
+                            Text { text: "1 · SOURCE AUDIO"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                TBtn {
+                                    label: vc-recording && vc-rec-mode == "mic" ? "■ Stop" : "● Record mic";
+                                    generate: vc-recording && vc-rec-mode == "mic";
+                                    clicked => { if (!vc-busy) { root.vc-toggle-record("mic"); } }
+                                }
+                                TBtn {
+                                    label: vc-recording && vc-rec-mode == "system" ? "■ Stop" : "◉ Record system";
+                                    generate: vc-recording && vc-rec-mode == "system";
+                                    clicked => { if (!vc-busy) { root.vc-toggle-record("system"); } }
+                                }
+                                TBtn {
+                                    label: "⇪ Import audio…";
+                                    clicked => { if (!vc-busy && !vc-recording) { root.vc-pick-file(); } }
+                                }
+                                Rectangle {}
+                                Text {
+                                    text: vc-status; font-size: 11px; font-family: Theme.mono;
+                                    color: Theme.dim; vertical-alignment: center;
+                                }
+                            }
+                            // armed source (history-card-style sunken box) + ▶ verify
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    height: 46px; horizontal-stretch: 1;
+                                    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                    border-radius: Theme.rad;
+                                    background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                    HorizontalLayout {
+                                        padding-left: 12px; padding-right: 12px;
+                                        Text {
+                                            text: vc-has-source ? vc-source-label
+                                                : "No source yet — record or import the audio to convert.";
+                                            font-size: 12px; font-family: Theme.font;
+                                            color: vc-has-source ? Theme.fg : Theme.dim;
+                                            opacity: vc-has-source ? 1.0 : 0.6;
+                                            vertical-alignment: center; overflow: elide;
+                                        }
+                                    }
+                                }
+                                TBtn {
+                                    label: vc-audition-id == (vc-armed-id == "" ? "scratch" : vc-armed-id) ? "■ Stop" : "▶ Play";
+                                    clicked => {
+                                        if (vc-has-source && !vc-recording) {
+                                            root.vc-audition(vc-armed-id == "" ? "scratch" : vc-armed-id);
+                                        }
+                                    }
+                                }
+                            }
+                            // persist the armed clip (hidden once it's already stored)
+                            if vc-has-source && !vc-armed-saved : HorizontalLayout {
+                                spacing: 8px;
+                                LabeledInput {
+                                    label: "CLIP NAME"; placeholder: "e.g. Interview excerpt";
+                                    value <=> vc-clip-name; horizontal-stretch: 1;
+                                }
+                                VerticalLayout {
+                                    alignment: end;
+                                    TBtn { label: "▤ Save clip"; clicked => { if (!vc-recording) { root.vc-save-clip(); } } }
+                                }
+                            }
+                            // 2 — target voice + result name + convert
+                            Text { text: "2 · TARGET VOICE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
+                            LabeledInput {
+                                label: "RESULT NAME (optional)"; placeholder: "names the history entry";
+                                value <=> vc-result-name;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                ThemedDropdown {
+                                    horizontal-stretch: 1;
+                                    model: vc-voice-names;
+                                    current-index <=> vc-voice-index;
+                                }
+                                TBtn {
+                                    label: vc-busy ? "…" : "⇄ Convert"; generate: true; min-width: 130px;
+                                    clicked => {
+                                        if (!vc-busy && !vc-recording && vc-has-source && vc-voice-names.length > 0) {
+                                            root.vc-convert(vc-voice-index);
+                                        }
+                                    }
+                                }
+                            }
+                            if vc-voice-names.length == 0 : Text {
+                                text: "No cloned voices yet — create one first (✦ Create voice in Text to Speech).";
+                                font-size: 11px; font-family: Theme.mono; color: Theme.dim;
+                            }
+                            // last conversion failure (composer error-line pattern:
+                            // elide + ⧉ copy; preferred-width 0 so it can't inflate)
+                            if vc-error != "" : HorizontalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: "⚠ " + vc-error;
+                                    font-size: 10px; font-family: Theme.mono; color: #cc3b3b;
+                                    overflow: elide; preferred-width: 0px;
+                                    horizontal-stretch: 1; vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    width: 18px; height: 16px; border-radius: Theme.rad;
+                                    background: vecta.has-hover ? Theme.acc-soft : transparent;
+                                    vecti := TextInput { text: vc-error; read-only: true; opacity: 0; width: 1px; height: 1px; }
+                                    vecta := TouchArea { clicked => { vecti.select-all(); vecti.copy(); } }
+                                    Text { text: "⧉"; font-size: 10px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
                             Text {
-                                text: "⚠ " + vc-error;
-                                font-size: 10px; font-family: Theme.mono; color: #cc3b3b;
-                                overflow: elide; preferred-width: 0px;
-                                horizontal-stretch: 1; vertical-alignment: center;
+                                text: "The conversion keeps the original words, timing and delivery — only the voice changes. The result plays when ready and lands in History, where it can be starred, exported or deleted.";
+                                font-size: 11px; color: Theme.dim; wrap: word-wrap;
                             }
-                            Rectangle {
-                                width: 18px; height: 16px; border-radius: Theme.rad;
-                                background: vecta.has-hover ? Theme.acc-soft : transparent;
-                                vecti := TextInput { text: vc-error; read-only: true; opacity: 0; width: 1px; height: 1px; }
-                                vecta := TouchArea { clicked => { vecti.select-all(); vecti.copy(); } }
-                                Text { text: "⧉"; font-size: 10px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
-                            }
+                            Rectangle {}
                         }
-                        Text {
-                            text: "The conversion keeps the original words, timing and delivery — only the voice changes. The result plays when ready and lands in History.";
-                            font-size: 11px; color: Theme.dim; wrap: word-wrap;
-                        }
-                        Rectangle {}
                     }
 
                     // ---- stub for other tabs ----

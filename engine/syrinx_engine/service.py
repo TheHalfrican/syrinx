@@ -15,7 +15,7 @@ from dbus_next.constants import PropertyAccess
 from .tts import SpeechSynthesizer
 from .stt import Transcriber
 from .profiles import ProfileStore
-from .history import CaptureStore, HistoryStore
+from .history import CaptureStore, HistoryStore, SourceClipStore
 from .llm import PersonalityLLM
 from .models import ModelManager, spec as model_spec, detect_hardware
 from . import audio, effects
@@ -42,6 +42,7 @@ class EngineInterface(ServiceInterface):
         self._stt = Transcriber()
         self._history = HistoryStore()
         self._captures = CaptureStore()
+        self._srcclips = SourceClipStore()
         self._fx_store = effects.EffectPresetStore()
         self._llm = PersonalityLLM()  # lazy — loads on first Compose/Rewrite
         self._models = ModelManager()
@@ -209,16 +210,17 @@ class EngineInterface(ServiceInterface):
         return req_id
 
     @method()
-    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s") -> "u":  # noqa: F821
+    async def ConvertVoice(self, audio_path: "s", profile_id: "s", engine: "s", label: "s") -> "u":  # noqa: F821
         """Style-preserved voice conversion (the ⇄ tab): re-render the speech
         in *audio_path* with a cloned profile's voice, keeping the source's
         delivery (words/timing/prosody — only the timbre changes). *engine*
-        "" = the default (chatterbox_vc). Returns a generation id; progress
+        "" = the default (chatterbox_vc); *label* names the history row ("" =
+        derived from the source filename). Returns a generation id; progress
         and errors arrive via GenerationProgress, and the result auto-plays
         and lands in history exactly like Speak."""
-        return self._start_convert(audio_path, profile_id, engine)
+        return self._start_convert(audio_path, profile_id, engine, label)
 
-    def _start_convert(self, audio_path: str, profile_id: str, engine: str) -> int:
+    def _start_convert(self, audio_path: str, profile_id: str, engine: str, label: str) -> int:
         gen_id = self._next_gen_id
         self._next_gen_id += 1
 
@@ -244,7 +246,7 @@ class EngineInterface(ServiceInterface):
                     item = self._history.save_clip(
                         voice_id=profile_id,
                         voice_name=prof.name,
-                        text=f"[voice conversion] {Path(audio_path).name}",
+                        text=label.strip() or f"[voice conversion] {Path(audio_path).name}",
                         pcm=pcm,
                         sample_rate=rate,
                         engine=be.engine_name,
@@ -706,6 +708,59 @@ class EngineInterface(ServiceInterface):
     @method()
     async def DeleteCapture(self, capture_id: "s") -> None:  # noqa: F821
         self._captures.delete(capture_id)
+
+    # --- voice-changer source clips (named recordings/imports) ----------
+
+    @method()
+    async def SaveSourceClip(self, path: "s", name: "s") -> "s":  # noqa: F821
+        """Copy an audio file into the clip store; returns the new clip id
+        ("" on failure). An empty name gets a time-based default."""
+        try:
+            return self._srcclips.save(path, name).id
+        except Exception:  # noqa: BLE001
+            log.exception("SaveSourceClip %s failed", path)
+            return ""
+
+    @method()
+    async def ListSourceClips(self) -> "s":  # noqa: F821
+        return json.dumps([c.to_dict() for c in self._srcclips.list()])
+
+    @method()
+    async def DeleteSourceClip(self, clip_id: "s") -> None:  # noqa: F821
+        self._srcclips.delete(clip_id)
+
+    @method()
+    async def PlayFile(self, path: "s", title: "s") -> "u":  # noqa: F821
+        """Audition any local audio file through the normal player (0 if
+        unreadable). Used by the ⇄ tab to verify sources before converting."""
+        try:
+            pcm, rate = effects.load_wav(path)
+        except Exception:  # noqa: BLE001
+            log.exception("PlayFile: unreadable %s", path)
+            return 0
+        gen_id = self._next_gen_id
+        self._next_gen_id += 1
+        bars = json.dumps(audio.envelope(pcm))
+        duration = len(pcm) / 4 / rate
+        title = title or Path(path).stem
+
+        async def run() -> None:
+            try:
+                self.SpeakStarted(gen_id)
+                await self._play(
+                    gen_id, pcm, rate,
+                    on_start=lambda: self.PlaybackInfo(gen_id, "", title, duration, bars),
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                log.exception("PlayFile %s failed", path)
+            finally:
+                self.SpeakEnded(gen_id)
+                self._tasks.pop(gen_id, None)
+
+        self._tasks[gen_id] = asyncio.create_task(run())
+        return gen_id
 
     @method()
     def Cancel(self, gen_id: "u") -> None:  # noqa: F821

@@ -90,10 +90,25 @@ pub trait Engine {
 
     /// Style-preserved voice conversion: re-render the speech in `audio_path`
     /// with a cloned profile's voice, keeping the source delivery (only the
-    /// timbre changes). `engine` "" = the default (chatterbox_vc). Returns a
-    /// generation id; progress/errors arrive via `GenerationProgress`, and the
-    /// result auto-plays and lands in history like Speak.
-    fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str) -> zbus::Result<u32>;
+    /// timbre changes). `engine` "" = the default (chatterbox_vc); `label`
+    /// names the history row ("" = derived from the source filename). Returns
+    /// a generation id; progress/errors arrive via `GenerationProgress`, and
+    /// the result auto-plays and lands in history like Speak.
+    fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str, label: &str) -> zbus::Result<u32>;
+
+    /// Copy an audio file into the voice-changer clip store; returns the new
+    /// clip id ("" on failure). An empty name gets a time-based default.
+    fn save_source_clip(&self, path: &str, name: &str) -> zbus::Result<String>;
+
+    /// Saved voice-changer source clips as a JSON array (newest first).
+    fn list_source_clips(&self) -> zbus::Result<String>;
+
+    /// Delete a saved source clip (row + audio file).
+    fn delete_source_clip(&self, clip_id: &str) -> zbus::Result<()>;
+
+    /// Audition any local audio file through the normal player; returns a
+    /// generation id (0 if unreadable). "" title = the file stem.
+    fn play_file(&self, path: &str, title: &str) -> zbus::Result<u32>;
 
     /// Delete a reference sample.
     fn delete_sample(&self, sample_id: &str) -> zbus::Result<()>;

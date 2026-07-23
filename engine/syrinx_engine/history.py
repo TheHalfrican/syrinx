@@ -10,6 +10,7 @@ Audio:   $SYRINX_DATA_DIR/history/<id>.wav   (PCM16 mono; paths stored relative)
 """
 
 import json
+import shutil
 import sqlite3
 import time
 import uuid
@@ -277,3 +278,110 @@ class CaptureStore:
     def delete(self, cid: str) -> None:
         with self._conn() as c:
             c.execute("DELETE FROM captures WHERE id=?", (cid,))
+
+
+def _audio_duration(path: str) -> float:
+    """Best-effort duration in seconds (0.0 for containers soundfile can't read)."""
+    try:
+        import soundfile as sf
+
+        info = sf.info(path)
+        return info.frames / float(info.samplerate or 1)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+@dataclass
+class SourceClipItem:
+    id: str
+    name: str
+    duration: float
+    created_at: float
+    path: str  # absolute — the app arms it directly as a conversion source
+
+    def to_dict(self) -> dict:
+        mins, secs = divmod(int(round(self.duration)), 60)
+        return {
+            "id": self.id,
+            "name": self.name,
+            "duration": self.duration,
+            "created_at": self.created_at,
+            "path": self.path,
+            # display string computed here — the app shows it verbatim
+            "meta": f"{mins}:{secs:02d} · "
+            + time.strftime("%b %d · %H:%M", time.localtime(self.created_at)),
+        }
+
+
+class SourceClipStore:
+    """Voice-changer source clips — named recordings/imports kept for reuse.
+
+    Unlike history rows these are *inputs*, not results. Audio is copied in
+    on save (recordings live in the volatile runtime dir otherwise):
+    $SYRINX_DATA_DIR/clips/<id>.<ext>, table ``source_clips``.
+    """
+
+    def __init__(self) -> None:
+        self._dir = _data_dir()
+        self._clips = self._dir / "clips"
+        self._clips.mkdir(parents=True, exist_ok=True)
+        self._db = str(self._dir / "syrinx.db")
+        self._init_schema()
+
+    def _conn(self) -> sqlite3.Connection:
+        c = sqlite3.connect(self._db)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _init_schema(self) -> None:
+        with self._conn() as c:
+            c.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS source_clips(
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    duration REAL,
+                    created_at REAL
+                );
+                """
+            )
+
+    def save(self, src_path: str, name: str) -> SourceClipItem:
+        cid = uuid.uuid4().hex[:12]
+        now = time.time()
+        ext = Path(src_path).suffix.lower() or ".wav"
+        fname = f"{cid}{ext}"
+        dest = self._clips / fname
+        shutil.copy2(src_path, dest)
+        duration = _audio_duration(str(dest))
+        name = name.strip() or time.strftime("clip %H:%M:%S", time.localtime(now))
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO source_clips(id,name,filename,duration,created_at)"
+                " VALUES(?,?,?,?,?)",
+                (cid, name, fname, duration, now),
+            )
+        return SourceClipItem(cid, name, duration, now, str(dest))
+
+    def list(self) -> list[SourceClipItem]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM source_clips ORDER BY created_at DESC"
+            ).fetchall()
+            return [
+                SourceClipItem(
+                    r["id"], r["name"], r["duration"] or 0.0,
+                    r["created_at"] or 0.0, str(self._clips / r["filename"]),
+                )
+                for r in rows
+            ]
+
+    def delete(self, clip_id: str) -> None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT filename FROM source_clips WHERE id=?", (clip_id,)
+            ).fetchone()
+            c.execute("DELETE FROM source_clips WHERE id=?", (clip_id,))
+        if row:
+            (self._clips / row["filename"]).unlink(missing_ok=True)

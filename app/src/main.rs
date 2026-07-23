@@ -62,7 +62,11 @@ enum Cmd {
     VcLoad,
     VcToggleRecord { system: bool },
     VcPickFile,
-    VcConvert { index: usize },
+    VcConvert { index: usize, label: String },
+    VcSaveClip { name: String },
+    VcDeleteClip { id: String },
+    VcArmClip { id: String },
+    VcAudition { id: String },
     // voices tab (profile table + inspector)
     VoicesLoad,
     VoicesSearch { q: String },
@@ -426,9 +430,33 @@ fn main() -> anyhow::Result<()> {
     }
     {
         let tx = tx.clone();
+        let ui_weak = ui.as_weak();
         ui.on_vc_convert(move |i| {
-            let _ = tx.send(Cmd::VcConvert { index: i.max(0) as usize });
+            let ui = ui_weak.unwrap();
+            let label = ui.get_vc_result_name().to_string();
+            let _ = tx.send(Cmd::VcConvert { index: i.max(0) as usize, label });
         });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_vc_save_clip(move || {
+            let ui = ui_weak.unwrap();
+            let name = ui.get_vc_clip_name().to_string();
+            let _ = tx.send(Cmd::VcSaveClip { name });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vc_delete_clip(move |id| { let _ = tx.send(Cmd::VcDeleteClip { id: id.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vc_arm_clip(move |id| { let _ = tx.send(Cmd::VcArmClip { id: id.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vc_audition(move |id| { let _ = tx.send(Cmd::VcAudition { id: id.to_string() }); });
     }
     // Captures (persisted transcripts): save-or-update decided by tr-capture-id.
     {
@@ -1339,6 +1367,32 @@ fn build_captures(json: &str) -> Vec<CaptureItem> {
         .collect()
 }
 
+/// Refresh the ⇄ tab's saved-clip rail; returns (id, name, path) rows the
+/// worker keeps for arming/audition/deletion by id.
+async fn refresh_vc_clips(
+    ui: &slint::Weak<AppWindow>,
+    proxy: &EngineProxy<'_>,
+) -> Vec<(String, String, String)> {
+    let j = proxy.list_source_clips().await.unwrap_or_else(|_| "[]".into());
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&j).unwrap_or_default();
+    let mut data = Vec::new();
+    let mut items: Vec<SourceClipItem> = Vec::new();
+    for c in &arr {
+        let g = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let (id, name, path, meta) = (g("id"), g("name"), g("path"), g("meta"));
+        items.push(SourceClipItem {
+            id: id.clone().into(),
+            name: name.clone().into(),
+            meta: meta.into(),
+        });
+        data.push((id, name, path));
+    }
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_vc_clips(ModelRc::from(Rc::new(VecModel::from(items))));
+    }).ok();
+    data
+}
+
 fn set_captures_model(ui: &AppWindow, items: Vec<CaptureItem>) {
     if let Some(vm) = ui.get_captures().as_any().downcast_ref::<VecModel<CaptureItem>>() {
         vm.set_vec(items);
@@ -1545,6 +1599,9 @@ async fn worker(
     let mut vc_source: Option<String> = None;       // armed source path
     let mut vc_voice_ids: Vec<String> = Vec::new(); // parallel to the dropdown names
     let mut pending_vc: u32 = 0;                    // in-flight conversion gen id
+    let mut vc_clips_data: Vec<(String, String, String)> = Vec::new(); // (id, name, path)
+    let mut vc_audition_gen: u32 = 0;               // audition playback gen (0 = none)
+    let mut vc_audition_id = String::new();         // clip id or "scratch" being played
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -1725,6 +1782,14 @@ async fn worker(
                         }
                     }).ok();
                 }
+                // source-clip audition finished -> flip ■ back to ▶
+                if vc_audition_gen != 0
+                    && sig.args().map(|a| a.gen_id == vc_audition_gen).unwrap_or(false)
+                {
+                    vc_audition_gen = 0;
+                    vc_audition_id.clear();
+                    ui.upgrade_in_event_loop(|ui| ui.set_vc_audition_id("".into())).ok();
+                }
                 // sample audition ran to its end (or was replaced) -> flip ■ back to ▶
                 let sample_done = sample_gen != 0
                     && sig.args().map(|a| a.gen_id == sample_gen).unwrap_or(false);
@@ -1783,6 +1848,8 @@ async fn worker(
                                 ui.set_vc_recording(false);
                                 ui.set_vc_has_source(true);
                                 ui.set_vc_source_label(label.into());
+                                ui.set_vc_armed_id("".into());
+                                ui.set_vc_armed_saved(false);
                                 ui.set_vc_status("".into());
                             }).ok();
                         }
@@ -2603,6 +2670,7 @@ async fn worker(
                         if ui.get_vc_voice_index() >= count { ui.set_vc_voice_index(0); }
                         ui.set_vc_voice_names(ModelRc::from(Rc::new(VecModel::from(names))));
                     }).ok();
+                    vc_clips_data = refresh_vc_clips(&ui, &proxy).await;
                 }
                 Some(Cmd::VcToggleRecord { system }) => {
                     if let Some(mut child) = vc_rec.take() {
@@ -2621,6 +2689,8 @@ async fn worker(
                                 ui.set_vc_recording(false);
                                 ui.set_vc_has_source(true);
                                 ui.set_vc_source_label(label.into());
+                                ui.set_vc_armed_id("".into());
+                                ui.set_vc_armed_saved(false);
                                 ui.set_vc_status("".into());
                             }).ok();
                         }
@@ -2662,16 +2732,18 @@ async fn worker(
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_vc_has_source(true);
                             ui.set_vc_source_label(name.into());
+                            ui.set_vc_armed_id("".into());
+                            ui.set_vc_armed_saved(false);
                             ui.set_vc_error("".into());
                             ui.set_vc_status("".into());
                         }).ok();
                     }
                 }
-                Some(Cmd::VcConvert { index }) => {
+                Some(Cmd::VcConvert { index, label }) => {
                     if let (Some(src), Some(pid)) =
                         (vc_source.clone(), vc_voice_ids.get(index).cloned())
                     {
-                        match proxy.convert_voice(&src, &pid, "").await {
+                        match proxy.convert_voice(&src, &pid, "", &label).await {
                             Ok(gid) if gid != 0 => {
                                 pending_vc = gid;
                                 ui.upgrade_in_event_loop(|ui| {
@@ -2686,6 +2758,110 @@ async fn worker(
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_vc_status("engine unavailable".into());
                                 }).ok();
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::VcSaveClip { name }) => {
+                    if let Some(src) = vc_source.clone() {
+                        match proxy.save_source_clip(&src, &name).await {
+                            Ok(id) if !id.is_empty() => {
+                                vc_clips_data = refresh_vc_clips(&ui, &proxy).await;
+                                // arm the stored copy: the scratch wav gets
+                                // overwritten by the next recording
+                                if let Some((cid, cname, cpath)) =
+                                    vc_clips_data.iter().find(|(cid, _, _)| *cid == id).cloned()
+                                {
+                                    vc_source = Some(cpath);
+                                    ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_vc_armed_id(cid.into());
+                                        ui.set_vc_armed_saved(true);
+                                        ui.set_vc_source_label(cname.into());
+                                        ui.set_vc_clip_name("".into());
+                                        ui.set_vc_status("clip saved".into());
+                                    }).ok();
+                                }
+                            }
+                            _ => {
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_vc_status("⚠ save failed".into());
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::VcDeleteClip { id }) => {
+                    if vc_audition_id == id && vc_audition_gen != 0 {
+                        let _ = proxy.cancel(vc_audition_gen).await;
+                        vc_audition_gen = 0;
+                        vc_audition_id.clear();
+                    }
+                    if let Err(e) = proxy.delete_source_clip(&id).await {
+                        tracing::error!("delete clip failed: {e}");
+                    }
+                    vc_clips_data = refresh_vc_clips(&ui, &proxy).await;
+                    // deleting the armed clip disarms it — its file is gone
+                    let disarm = vc_source
+                        .as_deref()
+                        .map(|p| !vc_clips_data.iter().any(|(_, _, cp)| cp == p)
+                            && p.contains("/clips/"))
+                        .unwrap_or(false);
+                    if disarm {
+                        vc_source = None;
+                    }
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_vc_audition_id("".into());
+                        if disarm {
+                            ui.set_vc_has_source(false);
+                            ui.set_vc_source_label("".into());
+                            ui.set_vc_armed_id("".into());
+                            ui.set_vc_armed_saved(false);
+                        }
+                    }).ok();
+                }
+                Some(Cmd::VcArmClip { id }) => {
+                    if let Some((cid, cname, cpath)) =
+                        vc_clips_data.iter().find(|(cid, _, _)| *cid == id).cloned()
+                    {
+                        vc_source = Some(cpath);
+                        ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_vc_has_source(true);
+                            ui.set_vc_source_label(cname.into());
+                            ui.set_vc_armed_id(cid.into());
+                            ui.set_vc_armed_saved(true);
+                            ui.set_vc_error("".into());
+                            ui.set_vc_status("".into());
+                        }).ok();
+                    }
+                }
+                Some(Cmd::VcAudition { id }) => {
+                    if vc_audition_id == id && vc_audition_gen != 0 {
+                        // toggle off
+                        let _ = proxy.cancel(vc_audition_gen).await;
+                        vc_audition_gen = 0;
+                        vc_audition_id.clear();
+                        ui.upgrade_in_event_loop(|ui| ui.set_vc_audition_id("".into())).ok();
+                    } else {
+                        let resolved = if id == "scratch" {
+                            vc_source.clone().map(|p| (p, "source clip".to_string()))
+                        } else {
+                            vc_clips_data.iter().find(|(cid, _, _)| *cid == id)
+                                .map(|(_, n, p)| (p.clone(), n.clone()))
+                        };
+                        if let Some((path, title)) = resolved {
+                            match proxy.play_file(&path, &title).await {
+                                Ok(gid) if gid != 0 => {
+                                    vc_audition_gen = gid;
+                                    vc_audition_id = id.clone();
+                                    ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_vc_audition_id(id.into());
+                                    }).ok();
+                                }
+                                _ => {
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_vc_status("⚠ can't play this file".into());
+                                    }).ok();
+                                }
                             }
                         }
                     }
