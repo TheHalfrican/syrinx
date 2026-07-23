@@ -35,8 +35,9 @@ CLONING_ENGINES = {"qwen", "luxtts", "chatterbox", "chatterbox_turbo", "tada"}
 # while they're the active voice model (Models-tab "Use").
 EXTRA_PRESET_ENGINES = {"qwen_custom_voice"}
 # Voice-conversion engines (the ⇄ tab) — audio→audio, never in the voice
-# list. Vevo (timbre / 2) is the remaining phase-2 addition.
-VC_ENGINES = {"chatterbox_vc", "seed_vc"}
+# list. Vevo2 (unified speech+singing) rides the vevo worker as a mode when
+# the music pipeline lands.
+VC_ENGINES = {"chatterbox_vc", "seed_vc", "vevo_timbre"}
 DEFAULT_VC_ENGINE = "chatterbox_vc"
 
 
@@ -121,6 +122,10 @@ class SpeechSynthesizer:
                 from .backends.seed_vc import SeedVCBackend
 
                 self._backends[engine] = SeedVCBackend()
+            elif engine == "vevo_timbre":
+                from .backends.vevo import VevoTimbreBackend
+
+                self._backends[engine] = VevoTimbreBackend()
             else:
                 from .backends.chatterbox_vc import ChatterboxVCBackend
 

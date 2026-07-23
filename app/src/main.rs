@@ -964,7 +964,7 @@ fn is_vc_engine(engine: &str) -> bool {
 }
 
 /// Conversion-model ids, index-aligned with the vc-engine-names dropdown.
-const VC_ENGINE_IDS: &[&str] = &["chatterbox_vc", "seed_vc"];
+const VC_ENGINE_IDS: &[&str] = &["chatterbox_vc", "seed_vc", "vevo_timbre"];
 
 fn build_history(json: &str) -> Vec<HistItem> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
