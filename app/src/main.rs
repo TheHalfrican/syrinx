@@ -62,7 +62,7 @@ enum Cmd {
     VcLoad,
     VcToggleRecord { system: bool },
     VcPickFile,
-    VcConvert { index: usize, label: String, transcript: String },
+    VcConvert { index: usize, engine_index: usize, label: String, transcript: String },
     VcSaveClip { name: String, transcript: String },
     VcDeleteClip { id: String },
     VcArmClip { id: String },
@@ -435,7 +435,10 @@ fn main() -> anyhow::Result<()> {
             let ui = ui_weak.unwrap();
             let label = ui.get_vc_result_name().to_string();
             let transcript = ui.get_vc_transcript().to_string();
-            let _ = tx.send(Cmd::VcConvert { index: i.max(0) as usize, label, transcript });
+            let engine_index = ui.get_vc_engine_index().max(0) as usize;
+            let _ = tx.send(Cmd::VcConvert {
+                index: i.max(0) as usize, engine_index, label, transcript,
+            });
         });
     }
     {
@@ -959,6 +962,9 @@ fn fmt_dur(d: f64) -> String {
 fn is_vc_engine(engine: &str) -> bool {
     matches!(engine, "chatterbox_vc" | "seed_vc" | "vevo_timbre" | "vevo2")
 }
+
+/// Conversion-model ids, index-aligned with the vc-engine-names dropdown.
+const VC_ENGINE_IDS: &[&str] = &["chatterbox_vc"];
 
 fn build_history(json: &str) -> Vec<HistItem> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
@@ -2833,11 +2839,12 @@ async fn worker(
                         }
                     }
                 }
-                Some(Cmd::VcConvert { index, label, transcript }) => {
+                Some(Cmd::VcConvert { index, engine_index, label, transcript }) => {
                     if let (Some(src), Some(pid)) =
                         (vc_source.clone(), vc_voice_ids.get(index).cloned())
                     {
-                        match proxy.convert_voice(&src, &pid, "", &label, &transcript).await {
+                        let engine = VC_ENGINE_IDS.get(engine_index).copied().unwrap_or("");
+                        match proxy.convert_voice(&src, &pid, engine, &label, &transcript).await {
                             Ok(gid) if gid != 0 => {
                                 pending_vc = gid;
                                 ui.upgrade_in_event_loop(|ui| {

@@ -407,9 +407,11 @@ component LabeledInput inherits VerticalLayout {
     in property <string> label;
     in property <string> placeholder;
     in property <bool> multiline: false;
+    // overridable for placements on dark backdrops (vc view on Aero)
+    in property <color> label-color: Theme.dim;
     in-out property <string> value;
     spacing: 4px;
-    Text { text: label; font-size: 11px; font-weight: 700; color: Theme.dim; }
+    Text { text: label; font-size: 11px; font-weight: 700; color: label-color; }
     Rectangle {
         height: multiline ? 60px : 30px;
         background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
@@ -592,6 +594,10 @@ export component AppWindow inherits Window {
     in property <string> vc-error: "";
     in property <[string]> vc-voice-names: []; // cloned profiles with samples
     in-out property <int> vc-voice-index: 0;
+    // conversion models — ids resolved in Rust (VC_ENGINE_IDS); phase 2
+    // adds Seed-VC / Vevo entries here
+    in property <[string]> vc-engine-names: ["Chatterbox VC"];
+    in-out property <int> vc-engine-index: 0;
     in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)
     in property <[HistItem]> vc-history;       // conversion results (right rail)
     in property <string> vc-transcript;        // auto-transcribed source words
@@ -1673,7 +1679,7 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             spacing: 12px; horizontal-stretch: 1;
                             // 1 — source
-                            Text { text: "1 · SOURCE AUDIO"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
+                            Text { text: "1 · SOURCE AUDIO"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             HorizontalLayout {
                                 spacing: 8px;
                                 TBtn {
@@ -1731,6 +1737,7 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 LabeledInput {
                                     label: "CLIP NAME"; placeholder: "e.g. Interview excerpt";
+                                    label-color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim;
                                     value <=> vc-clip-name; horizontal-stretch: 1; vertical-stretch: 0;
                                 }
                                 VerticalLayout {
@@ -1743,7 +1750,7 @@ export component AppWindow inherits Window {
                             // This box takes the column's spare height.
                             HorizontalLayout {
                                 spacing: 8px;
-                                Text { text: "SOURCE TRANSCRIPT"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; vertical-alignment: center; }
+                                Text { text: "SOURCE TRANSCRIPT"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; vertical-alignment: center; }
                                 Rectangle {}
                                 if vc-transcribing : Text {
                                     text: "transcribing…"; font-size: 10.5px; font-family: Theme.mono;
@@ -1814,17 +1821,24 @@ export component AppWindow inherits Window {
                                 }
                             }
                             // 2 — target voice + result name + convert
-                            Text { text: "2 · TARGET VOICE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
+                            Text { text: "2 · TARGET VOICE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             LabeledInput {
                                 label: "RESULT NAME (optional)"; placeholder: "Type conversion name here…";
+                                label-color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim;
                                 value <=> vc-result-name; vertical-stretch: 0;
                             }
                             HorizontalLayout {
                                 spacing: 8px;
                                 ThemedDropdown {
-                                    horizontal-stretch: 1;
+                                    horizontal-stretch: 2;
                                     model: vc-voice-names;
                                     current-index <=> vc-voice-index;
+                                }
+                                // which model performs the conversion
+                                ThemedDropdown {
+                                    horizontal-stretch: 1;
+                                    model: vc-engine-names;
+                                    current-index <=> vc-engine-index;
                                 }
                                 TBtn {
                                     label: vc-busy ? "…" : "⇄ Convert"; generate: true; min-width: 130px;
@@ -1837,7 +1851,8 @@ export component AppWindow inherits Window {
                             }
                             if vc-voice-names.length == 0 : Text {
                                 text: "No cloned voices yet — create one first (✦ Create voice in Text to Speech).";
-                                font-size: 11px; font-family: Theme.mono; color: Theme.dim;
+                                font-size: 11px; font-family: Theme.mono;
+                                color: Theme.name == "vista" ? #ffffff : Theme.dim;
                             }
                             // last conversion failure (composer error-line pattern:
                             // elide + ⧉ copy; preferred-width 0 so it can't inflate)
@@ -1859,7 +1874,8 @@ export component AppWindow inherits Window {
                             }
                             Text {
                                 text: "The conversion keeps the original words, timing and delivery — only the voice changes. Results play when ready and land in the rail here and in History (labeled ⇄ VC).";
-                                font-size: 11px; color: Theme.dim; wrap: word-wrap;
+                                font-size: 11px; wrap: word-wrap;
+                                color: Theme.name == "vista" ? #ffffff : Theme.dim;
                             }
                         }
                         // conversion results rail — the same history rows,
