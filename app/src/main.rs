@@ -57,6 +57,11 @@ enum Cmd {
     TrRefine { text: String },
     TrSaveCapture { id: String, text: String },
     TrDeleteCapture { id: String },
+    // voices tab (profile table + inspector)
+    VoicesLoad,
+    VoicesSearch { q: String },
+    VoicesInspect { id: String },
+    PlaySample { id: String },
     // effects chain editor
     FxeShow,
     FxeLoad { index: usize },
@@ -293,6 +298,22 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_cv_cancel(move || { let _ = tx.send(Cmd::CvCancel); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_voices_open(move || { let _ = tx.send(Cmd::VoicesLoad); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_voices_search(move |q| { let _ = tx.send(Cmd::VoicesSearch { q: q.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vp_select(move |id| { let _ = tx.send(Cmd::VoicesInspect { id: id.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vs_play(move |id| { let _ = tx.send(Cmd::PlaySample { id: id.to_string() }); });
     }
 
     // Composer dropdowns, card actions, player loop/volume (Voicebox parity).
@@ -994,6 +1015,156 @@ async fn refresh_grid(
     .ok();
 }
 
+/// One Voices-tab table row, thread-safe half (images bake on the UI thread).
+#[derive(Clone)]
+struct VpRowData {
+    id: String,
+    name: String,
+    desc: String,
+    lang: String,
+    engine: String, // "follows" when unpinned
+    samples: String,
+    gens: String,
+    baked: Option<RgbaBuf>,
+}
+
+/// Filter + convert to slint rows. UI-thread only (creates Images).
+fn vp_to_rows(data: &[VpRowData], filter: &str) -> Vec<ProfileRow> {
+    let q = filter.to_lowercase();
+    data.iter()
+        .filter(|d| {
+            q.is_empty()
+                || d.name.to_lowercase().contains(&q)
+                || d.desc.to_lowercase().contains(&q)
+                || d.lang.to_lowercase().contains(&q)
+                || d.engine.to_lowercase().contains(&q)
+        })
+        .map(|d| ProfileRow {
+            id: d.id.clone().into(),
+            name: d.name.clone().into(),
+            desc: d.desc.clone().into(),
+            lang: d.lang.clone().into(),
+            engine: d.engine.clone().into(),
+            samples: d.samples.clone().into(),
+            gens: d.gens.clone().into(),
+            avatar: d.baked.as_ref().map(rgba_to_image).unwrap_or_default(),
+            has_avatar: d.baked.is_some(),
+        })
+        .collect()
+}
+
+/// Fill the Voices-tab inspector from GetProfile (+ cached table row data).
+async fn inspect_profile(
+    ui: &slint::Weak<AppWindow>,
+    proxy: &EngineProxy<'_>,
+    voices_all: &[VpRowData],
+    id: &str,
+) {
+    let Ok(pj) = proxy.get_profile(id).await else { return };
+    if pj.is_empty() {
+        return; // deleted since selection
+    }
+    let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
+    let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let samples: Vec<(String, String)> = p
+        .get("samples")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|smp| (
+                    smp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    smp.get("reference_text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                ))
+                .collect()
+        })
+        .unwrap_or_default();
+    let row = voices_all.iter().find(|d| d.id == id);
+    let gens = row.map(|d| d.gens.clone()).unwrap_or_else(|| "0".into());
+    let baked = row.and_then(|d| d.baked.clone());
+    let engine = {
+        let e = s("default_engine");
+        if e.is_empty() { "follows".to_string() } else { e }
+    };
+    let (name, desc, pers, lang) = (s("name"), s("description"), s("personality"), s("language"));
+    let id2 = id.to_string();
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_vp_selected(id2.into());
+        ui.set_vi_name(name.into());
+        ui.set_vi_desc(desc.into());
+        ui.set_vi_personality(pers.into());
+        ui.set_vi_lang(lang.into());
+        ui.set_vi_engine(engine.into());
+        ui.set_vi_gens(gens.into());
+        match baked {
+            Some(b) => { ui.set_vi_avatar(rgba_to_image(&b)); ui.set_vi_has_avatar(true); }
+            None => { ui.set_vi_avatar(Default::default()); ui.set_vi_has_avatar(false); }
+        }
+        ui.set_vi_samples(ModelRc::from(Rc::new(VecModel::from(
+            samples
+                .into_iter()
+                .map(|(sid, t)| SampleRow { id: sid.into(), text: t.into() })
+                .collect::<Vec<_>>(),
+        ))));
+    })
+    .ok();
+}
+
+/// Rebuild the Voices-tab table (profiles + per-voice generation counts).
+async fn refresh_voices_table(
+    ui: &slint::Weak<AppWindow>,
+    proxy: &EngineProxy<'_>,
+    cache: &mut HashMap<String, RgbaBuf>,
+    out: &mut Vec<VpRowData>,
+) {
+    let pj = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
+    let hj = proxy.list_history().await.unwrap_or_else(|_| "[]".into());
+    let profs: Vec<serde_json::Value> = serde_json::from_str(&pj).unwrap_or_default();
+    let hist: Vec<serde_json::Value> = serde_json::from_str(&hj).unwrap_or_default();
+    let mut gens: HashMap<String, usize> = HashMap::new();
+    for h in &hist {
+        if let Some(v) = h.get("voice_id").and_then(|v| v.as_str()) {
+            *gens.entry(v.to_string()).or_default() += 1;
+        }
+    }
+    *out = profs
+        .iter()
+        .filter_map(|p| {
+            let id = p.get("id")?.as_str()?.to_string();
+            let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let iv = |k: &str| p.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let baked = bake_avatar_rgba(
+                cache, &s("avatar_path"), iv("avatar_sx"), iv("avatar_sy"),
+                iv("avatar_side"), iv("avatar_sh"),
+            );
+            let engine = {
+                let e = s("default_engine");
+                if e.is_empty() { "follows".to_string() } else { e }
+            };
+            Some(VpRowData {
+                id: id.clone(),
+                name: s("name"),
+                desc: s("description"),
+                lang: s("language"),
+                engine,
+                samples: p.get("samples").and_then(|v| v.as_i64()).unwrap_or(0).to_string(),
+                gens: gens.get(&id).copied().unwrap_or(0).to_string(),
+                baked,
+            })
+        })
+        .collect();
+    let rows_src = out.clone();
+    ui.upgrade_in_event_loop(move |ui| {
+        let filter = ui.get_vp_search().to_string();
+        ui.set_vp_rows(ModelRc::from(Rc::new(VecModel::from(vp_to_rows(&rows_src, &filter)))));
+        // drop a selection whose profile no longer exists
+        let sel = ui.get_vp_selected().to_string();
+        if !sel.is_empty() && !rows_src.iter().any(|d| d.id == sel) {
+            ui.set_vp_selected("".into());
+        }
+    })
+    .ok();
+}
+
 /// Language of a Kokoro preset from its id convention: `builtin:kokoro:af_…`
 /// — first letter = language (a/b American/British English, e Spanish, …).
 fn kokoro_lang_code(voice_id: &str) -> &'static str {
@@ -1290,6 +1461,10 @@ async fn worker(
     let mut last_pct: f64 = 0.0;
     let mut speak_after_llm: Option<String> = None;
     let mut cv_edit: Option<String> = None;
+    let mut voices_all: Vec<VpRowData> = Vec::new();  // voices-tab table backing data
+    let mut vp_inspected = String::new();             // profile id shown in the inspector
+    let mut sample_gen: u32 = 0;                      // audition playback gen (0 = none)
+    let mut sample_playing = String::new();           // sample id being auditioned
     let mut cv_edit_transcript = String::new();
     let mut cv_avatar: Option<(String, String, i32, i32, i32, i32)> = None; // staged (path, mode, sx, sy, sw, sh)
     // transcription view state
@@ -1444,6 +1619,14 @@ async fn worker(
             Some(sig) = ended.next() => {
                 let is_current = sig.args().map(|a| a.gen_id == current_play_gen).unwrap_or(false);
                 if is_current { playing = false; }
+                // sample audition ran to its end (or was replaced) -> flip ■ back to ▶
+                let sample_done = sample_gen != 0
+                    && sig.args().map(|a| a.gen_id == sample_gen).unwrap_or(false);
+                if sample_done {
+                    sample_gen = 0;
+                    sample_playing.clear();
+                    ui.upgrade_in_event_loop(|ui| ui.set_vs_playing("".into())).ok();
+                }
                 // Loop: re-trigger only when the clip ran to its natural end
                 // (a Stop/Cancel arrives with the progress short of 1.0).
                 let looping = is_current && loop_on && last_pct > 0.97 && !current_clip.is_empty();
@@ -1717,6 +1900,11 @@ async fn worker(
                                     }
                                 }
                                 refresh_grid(&ui, &proxy, &mut avatar_cache).await;
+                                refresh_voices_table(&ui, &proxy, &mut avatar_cache, &mut voices_all).await;
+                                if vp_inspected == pid {
+                                    // saved edits land in the inspector immediately
+                                    inspect_profile(&ui, &proxy, &voices_all, &pid).await;
+                                }
                                 if sample_err.is_empty() {
                                     cv_edit = None;
                                     let pid2 = pid.clone();
@@ -1801,6 +1989,7 @@ async fn worker(
                                     ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
                                     ui.set_voices(ModelRc::from(Rc::new(VecModel::from(to_voice_items(grid)))));
                                 }).ok();
+                                refresh_voices_table(&ui, &proxy, &mut avatar_cache, &mut voices_all).await;
                             }
                             Err(e) => {
                                 tracing::error!("create voice failed: {e}");
@@ -1954,6 +2143,7 @@ async fn worker(
                             let patch = serde_json::json!({"language": code}).to_string();
                             proxy.update_profile(&voice, &patch).await.ok();
                             refresh_grid(&ui, &proxy, &mut avatar_cache).await;
+                            refresh_voices_table(&ui, &proxy, &mut avatar_cache, &mut voices_all).await;
                         }
                     }
                 }
@@ -2095,7 +2285,11 @@ async fn worker(
                 Some(Cmd::DeleteVoice { id }) => {
                     match proxy.delete_profile(&id).await {
                         Ok(_) => {
+                            if vp_inspected == id {
+                                vp_inspected.clear();
+                            }
                             refresh_grid(&ui, &proxy, &mut avatar_cache).await;
+                            refresh_voices_table(&ui, &proxy, &mut avatar_cache, &mut voices_all).await;
                             ui.upgrade_in_event_loop(move |ui| {
                                 if ui.get_selected_voice().as_str() == id {
                                     // fall back to the first bundled preset
@@ -2237,6 +2431,40 @@ async fn worker(
                             }).ok();
                         }
                         Err(e) => tracing::error!("delete capture failed: {e}"),
+                    }
+                }
+                Some(Cmd::VoicesLoad) => {
+                    refresh_voices_table(&ui, &proxy, &mut avatar_cache, &mut voices_all).await;
+                }
+                Some(Cmd::VoicesSearch { q }) => {
+                    let data = voices_all.clone();
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_vp_rows(ModelRc::from(Rc::new(VecModel::from(vp_to_rows(&data, &q)))));
+                    }).ok();
+                }
+                Some(Cmd::VoicesInspect { id }) => {
+                    vp_inspected = id.clone();
+                    inspect_profile(&ui, &proxy, &voices_all, &id).await;
+                }
+                Some(Cmd::PlaySample { id }) => {
+                    if sample_playing == id && sample_gen != 0 {
+                        // toggle: same sample clicked while playing -> stop
+                        proxy.cancel(sample_gen).await.ok();
+                        sample_gen = 0;
+                        sample_playing.clear();
+                        ui.upgrade_in_event_loop(|ui| ui.set_vs_playing("".into())).ok();
+                    } else {
+                        // engine playback is serialized (latest wins), so starting
+                        // a different sample implicitly replaces the current one
+                        match proxy.play_sample(&id).await {
+                            Ok(g) if g != 0 => {
+                                sample_gen = g;
+                                sample_playing = id.clone();
+                                let id2 = id.clone();
+                                ui.upgrade_in_event_loop(move |ui| ui.set_vs_playing(id2.into())).ok();
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 Some(Cmd::FxeShow) => {
@@ -2517,6 +2745,7 @@ async fn worker(
                             Ok(pid) => {
                                 tracing::info!("imported voice {pid}");
                                 refresh_grid(&ui, &proxy, &mut avatar_cache).await;
+                                refresh_voices_table(&ui, &proxy, &mut avatar_cache, &mut voices_all).await;
                             }
                             Err(e) => tracing::error!("import voice failed: {e}"),
                         }
