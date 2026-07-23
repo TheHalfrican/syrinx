@@ -960,11 +960,13 @@ export component AppWindow inherits Window {
                                             x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
                                         }
                                     }
-                                    // last generation failure (cleared on the next Generate)
+                                    // last generation failure (cleared on the next Generate).
+                                    // preferred-width 0: a long error must elide, not inflate
+                                    // the composer column and squeeze the history panel.
                                     if gen-error != "" : Text {
                                         text: "⚠ " + gen-error;
                                         font-size: 10px; font-family: Theme.mono; color: #cc3b3b;
-                                        overflow: elide;
+                                        overflow: elide; preferred-width: 0px;
                                     }
                                     // language / engine / effects (Voicebox dropdown row; opens upward)
                                     HorizontalLayout {
@@ -1818,7 +1820,7 @@ export component AppWindow inherits Window {
                             text: "⚠ " + cv-error;
                             font-size: 10px; font-family: Theme.mono; color: #cc3b3b;
                             vertical-alignment: center; overflow: elide;
-                            horizontal-stretch: 1;
+                            horizontal-stretch: 1; preferred-width: 0px;
                         }
                         if cv-error == "" : Rectangle { horizontal-stretch: 1; }
                         TBtn { label: "Cancel"; clicked => { root.cv-cancel(); cv-open = false; } }

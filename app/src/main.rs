@@ -1881,7 +1881,15 @@ async fn worker(
                 }
                 Some(Cmd::SelectVoice { id }) => {
                     let (engine, code) = if id.starts_with("builtin:") {
-                        ("kokoro".to_string(), kokoro_lang_code(&id).to_string())
+                        // builtin:<engine>:<voice> — kokoro or an extra preset
+                        // engine like qwen_custom_voice
+                        let engine = id.split(':').nth(1).unwrap_or("kokoro").to_string();
+                        let code = if engine == "kokoro" {
+                            kokoro_lang_code(&id).to_string()
+                        } else {
+                            "en".to_string()
+                        };
+                        (engine, code)
                     } else if let Ok(pj) = proxy.get_profile(&id).await {
                         let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
                         let de = p.get("default_engine").and_then(|v| v.as_str()).unwrap_or("");
