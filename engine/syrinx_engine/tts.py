@@ -125,16 +125,16 @@ class SpeechSynthesizer:
     async def synthesize(self, text: str, voice_id: str, instruct: str = "") -> tuple[bytes, int]:
         if voice_id.startswith("builtin:"):
             _, engine, vid = voice_id.split(":", 2)
-            return await self._be(engine).synthesize(text, vid)
+            return await self._be(engine).synthesize(text, vid, instruct)
 
         prof = self._profiles.get(voice_id)
         if prof is None:
             # Back-compat: treat an unknown id as a raw built-in preset voice.
-            return await self._be(BUILTIN_PRESET_ENGINE).synthesize(text, voice_id)
+            return await self._be(BUILTIN_PRESET_ENGINE).synthesize(text, voice_id, instruct)
 
         if prof.voice_type == "preset":
             engine = prof.preset_engine or BUILTIN_PRESET_ENGINE
-            return await self._be(engine).synthesize(text, prof.preset_voice_id)
+            return await self._be(engine).synthesize(text, prof.preset_voice_id, instruct)
 
         # cloned
         be = self._be(prof.default_engine or self.clone_engine)

@@ -61,6 +61,7 @@ class EngineInterface(ServiceInterface):
         self._play_epoch = 0               # latest playback request wins
         self._volume = 1.0                 # playback gain 0..1 (SetVolume)
         self._active_effect = ""           # preset id applied to generations (SetEffect)
+        self._active_style = ""            # delivery instruct baked into generations (SetStyle)
 
     @property
     def backend_name(self) -> str:
@@ -89,7 +90,7 @@ class EngineInterface(ServiceInterface):
             try:
                 self.SpeakStarted(gen_id)
                 self.GenerationProgress(gen_id, "synthesizing", 0.0)
-                pcm, rate = await self._tts.synthesize(text, voice_id)
+                pcm, rate = await self._tts.synthesize(text, voice_id, self._active_style)
                 if self._active_effect:
                     self.GenerationProgress(gen_id, "effects", 0.9)
                     pcm = await asyncio.to_thread(
@@ -488,6 +489,17 @@ class EngineInterface(ServiceInterface):
         known = effects.resolve_preset(preset_id, self._fx_store) is not None
         self._active_effect = preset_id if known else ""
         log.info("active effect -> %r", self._active_effect or "none")
+
+    @method()
+    async def SetStyle(self, instruct: "s") -> None:  # noqa: F821
+        """Delivery direction baked into generations ("" = neutral).
+
+        Free-text natural-language instruct ("Speak in an extremely angry
+        tone…"). Honored by the qwen engines; engines without style control
+        ignore it.
+        """
+        self._active_style = instruct
+        log.info("active style -> %r", instruct[:40] if instruct else "none")
 
     @method()
     async def ApplyHistoryEffects(self, hid: "s", preset_id: "s") -> "s":  # noqa: F821

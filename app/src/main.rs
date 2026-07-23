@@ -45,6 +45,7 @@ enum Cmd {
     ToggleLoop { on: bool },
     SetVol { v: f64 },
     PickEffect { index: usize },
+    PickStyle { index: usize },
     ApplyFx { hid: String, index: usize },
     ExportVoice { id: String, name: String },
     EditVoice { id: String },
@@ -346,6 +347,10 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_pick_effect(move |i| { let _ = tx.send(Cmd::PickEffect { index: i as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_pick_style(move |i| { let _ = tx.send(Cmd::PickStyle { index: i as usize }); });
     }
     {
         let tx = tx.clone();
@@ -775,6 +780,21 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
     let default_selected = kokoro_ids.first().map(|s| s.to_string()).unwrap_or_default();
     GridData { grid, kokoro_names, kokoro_ids, default_selected }
 }
+
+/// Delivery directions for the composer style dropdown. Labels must match
+/// the dropdown model in main.slint; the instruct text is sent verbatim to
+/// the engine (SetStyle) and honored by the qwen engines. Phrasing is
+/// deliberately intense — subtle directions barely move the performance.
+const STYLES: &[(&str, &str)] = &[
+    ("No direction", ""),
+    ("Angry", "Speak in an extremely angry, furious tone — seething, sharp, and aggressive, as if barely containing rage."),
+    ("Sad", "Speak in a deeply sad, sorrowful tone — heavy, slow, and grief-stricken, as if on the verge of tears."),
+    ("Happy", "Speak in an intensely happy, joyful tone — bright, warm, and beaming with delight."),
+    ("Excited", "Speak with overwhelming excitement and energy — fast, breathless, and absolutely thrilled."),
+    ("Fearful", "Speak in a terrified, trembling tone — shaky, urgent, and full of dread."),
+    ("Whisper", "Speak in a hushed, intense whisper — quiet, breathy, close, and conspiratorial."),
+    ("Serious", "Speak in a grave, deadly serious tone — measured, cold, and commanding."),
+];
 
 /// Short human message for a failed profile D-Bus call.
 fn profile_err_msg(e: &zbus::Error) -> String {
@@ -2173,6 +2193,11 @@ async fn worker(
                 Some(Cmd::PickEffect { index }) => {
                     if let Some(pid) = effect_ids.get(index) {
                         proxy.set_effect(pid).await.ok();
+                    }
+                }
+                Some(Cmd::PickStyle { index }) => {
+                    if let Some((_, instruct)) = STYLES.get(index) {
+                        proxy.set_style(instruct).await.ok();
                     }
                 }
                 Some(Cmd::ApplyFx { hid, index }) => {

@@ -128,6 +128,10 @@ pub trait Engine {
     /// Set the preset applied to subsequent generations ("" = none).
     fn set_effect(&self, preset_id: &str) -> zbus::Result<()>;
 
+    /// Delivery direction baked into generations ("" = neutral); free-text
+    /// instruct honored by the qwen engines.
+    fn set_style(&self, instruct: &str) -> zbus::Result<()>;
+
     /// Re-process a history clip through a preset; returns the new history id.
     fn apply_history_effects(&self, hid: &str, preset_id: &str) -> zbus::Result<String>;
 

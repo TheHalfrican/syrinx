@@ -66,7 +66,7 @@ class LuxTTSBackend:
     async def list_voices(self) -> list:
         return []  # cloning-only, no presets
 
-    async def synthesize(self, text: str, voice_id: str) -> tuple:
+    async def synthesize(self, text: str, voice_id: str, instruct: str = "") -> tuple:
         raise ValueError("LuxTTS has no preset voices")
 
     async def _request(self, sample, text: str) -> tuple:

@@ -197,11 +197,11 @@ class QwenBackend:
 
         return await chunking.synthesize_chunked(_run, text, log=log, label="qwen")
 
-    async def synthesize(self, text: str, voice_id: str) -> tuple[bytes, int]:
+    async def synthesize(self, text: str, voice_id: str, instruct: str = "") -> tuple[bytes, int]:
         await self.load()
         prompt = self._get_prompt(voice_id)
         log.info("synthesize [qwen %s] (%s): %r", self.model_size, voice_id, text[:60])
-        return await self._generate_chunked(text, prompt, None)
+        return await self._generate_chunked(text, prompt, instruct or None)
 
     # --- profile-based cloning -----------------------------------------
 
@@ -344,14 +344,14 @@ class QwenCustomVoiceBackend:
 
         return _run
 
-    async def synthesize(self, text: str, voice_id: str) -> tuple[bytes, int]:
+    async def synthesize(self, text: str, voice_id: str, instruct: str = "") -> tuple[bytes, int]:
         await self.load()
         known = {sid for sid, _ in CV_VOICES}
         speaker = voice_id if voice_id in known else CV_DEFAULT_SPEAKER
         log.info("synthesize [qwen_cv %s] (%s): %r", self.model_size, speaker, text[:60])
         # no language context on the raw preset path — the model auto-detects
         return await chunking.synthesize_chunked(
-            self._gen(speaker, "", None), text, log=log, label="qwen_cv"
+            self._gen(speaker, "", instruct or None), text, log=log, label="qwen_cv"
         )
 
     async def synthesize_profile(self, profile, text: str, instruct: str = "") -> tuple[bytes, int]:

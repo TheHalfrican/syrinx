@@ -68,7 +68,8 @@ class KokoroBackend:
     async def list_voices(self) -> list[VoiceInfo]:
         return [VoiceInfo(vid, name) for vid, name in VOICES]
 
-    async def synthesize(self, text: str, voice_id: str) -> tuple[bytes, int]:
+    async def synthesize(self, text: str, voice_id: str, instruct: str = "") -> tuple[bytes, int]:
+        # kokoro has no style control; instruct is accepted and ignored
         await self.load()
         voice = voice_id if any(voice_id == v for v, _ in VOICES) else DEFAULT_VOICE
         lang_code = voice[0]

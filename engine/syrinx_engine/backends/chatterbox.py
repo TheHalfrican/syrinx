@@ -131,7 +131,7 @@ class _ChatterboxBase:
     async def list_voices(self) -> list:
         return []  # cloning-only, no presets
 
-    async def synthesize(self, text: str, voice_id: str) -> tuple:
+    async def synthesize(self, text: str, voice_id: str, instruct: str = "") -> tuple:
         raise ValueError(f"{self.engine_name} has no preset voices")
 
     def invalidate_profile(self, profile_id: str) -> None:
