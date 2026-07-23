@@ -11,6 +11,10 @@ export struct VoiceItem {
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
 export struct CaptureItem { id: string, text: string, date: string }
 export struct SourceClipItem { id: string, name: string, meta: string }
+export struct LibItem {
+    id: string, title: string, meta: string, text: string,
+    starred: bool, tags: string,  // tags = comma-joined, editable as typed
+}
 export struct ProfileRow {
     id: string, name: string, desc: string, lang: string, engine: string,
     samples: string, gens: string, avatar: image, has-avatar: bool,
@@ -762,6 +766,21 @@ export component AppWindow inherits Window {
     in property <bool> vi-has-avatar;
     in property <[SampleRow]> vi-samples;
     in property <string> vs-playing: "";  // sample id currently auditioning
+    // --- library (▤ tab): every generation, saved and searchable ---
+    in property <[LibItem]> lib-rows;
+    in-out property <string> lib-search;
+    in property <[string]> lib-voice-names: ["All voices"];
+    in-out property <int> lib-voice-index: 0;
+    in-out property <int> lib-type-index: 0;   // All / TTS / speech VC / music
+    in-out property <bool> lib-starred-only: false;
+    in property <string> lib-count-line;
+    in-out property <string> lib-tag-id: "";   // row whose tags are being edited
+    in-out property <string> lib-tag-title;
+    in-out property <string> lib-tag-value;    // comma-separated editor value
+    callback lib-open();                       // (re)load when the tab opens
+    callback lib-refilter();                   // any filter control changed
+    callback lib-save-tags();
+
     callback voices-open();          // (re)load the table when the tab opens
     callback voices-search(string);
     callback vp-select(string);      // row click -> inspector
@@ -813,7 +832,7 @@ export component AppWindow inherits Window {
                         hover-changed(on, y) => { nav-tip = on ? "Transcription" : ""; nav-tip-y = y; } } }
                     HorizontalLayout { alignment: center; NavIcon { glyph: "⇄"; active: tab == "vc"; clicked => { tab = "vc"; root.vc-open(); }
                         hover-changed(on, y) => { nav-tip = on ? "Voice Converter" : ""; nav-tip-y = y; } } }
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "▤"; active: tab == "lib"; clicked => { tab = "lib"; }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "▤"; active: tab == "lib"; clicked => { tab = "lib"; root.lib-open(); }
                         hover-changed(on, y) => { nav-tip = on ? "Library" : ""; nav-tip-y = y; } } }
                     HorizontalLayout { alignment: center; NavIcon { glyph: "◈"; active: tab == "models"; clicked => { tab = "models"; }
                         hover-changed(on, y) => { nav-tip = on ? "Models" : ""; nav-tip-y = y; } } }
@@ -837,6 +856,7 @@ export component AppWindow inherits Window {
                                     : tab == "stt" ? "Transcription"
                                     : tab == "voices" ? "Voices"
                                     : tab == "vc" ? "Voice Converter"
+                                    : tab == "lib" ? "Audio Library"
                                     : (tab == "models" ? "Models" : "Coming soon");
                                 font-size: 19px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.fg;
                             }
@@ -845,6 +865,7 @@ export component AppWindow inherits Window {
                                     : tab == "stt" ? "Record or import audio — whisper turns it into text."
                                     : tab == "voices" ? "Every profile in one place — inspect, audition, manage."
                                     : tab == "vc" ? "Dub any recording with one of your voices — the delivery stays, the timbre changes."
+                                    : tab == "lib" ? "Every generation, saved and searchable."
                                     : (tab == "models" ? hardware-line : "This screen is stubbed for now.");
                                 font-size: 12px; color: Theme.name == "win95" ? #cfe6e6 : Theme.dim;
                             }
@@ -2001,10 +2022,169 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // ---- Audio Library: every generation, saved and searchable ----
+                    if tab == "lib" : VerticalLayout {
+                        padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 10px;
+                        // toolbar: search · type · voice · starred
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                height: 32px; horizontal-stretch: 1;
+                                background: Theme.name == "win95" ? #ffffff : Theme.card-bg;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                if lib-search == "" : Text {
+                                    x: 9px; y: 8px; text: "Search titles, words, tags…";
+                                    font-size: 12.5px; color: Theme.dim; opacity: 0.6; font-family: Theme.font;
+                                }
+                                TextInput {
+                                    x: 9px; y: 8px; width: parent.width - 18px; height: parent.height - 14px;
+                                    text <=> lib-search; font-size: 12.5px; color: Theme.fg; font-family: Theme.font;
+                                    single-line: true; wrap: no-wrap;
+                                    edited => { root.lib-refilter(); }
+                                }
+                            }
+                            ThemedDropdown {
+                                width: 140px;
+                                model: ["All types", "TTS", "⇄ Speech VC", "♫ Music"];
+                                current-index <=> lib-type-index;
+                                selected(i) => { root.lib-refilter(); }
+                            }
+                            ThemedDropdown {
+                                width: 160px;
+                                model: lib-voice-names;
+                                current-index <=> lib-voice-index;
+                                selected(i) => { root.lib-refilter(); }
+                            }
+                            TBtn {
+                                label: lib-starred-only ? "★ Starred" : "☆ Starred";
+                                generate: lib-starred-only;
+                                clicked => { lib-starred-only = !lib-starred-only; root.lib-refilter(); }
+                            }
+                        }
+                        Text {
+                            text: lib-count-line; font-size: 10.5px; font-family: Theme.mono;
+                            color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim;
+                        }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                spacing: 8px;
+                                for r in lib-rows : Rectangle {
+                                    // fixed height so the ScrollView scrolls
+                                    height: 118px;
+                                    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                    border-radius: Theme.rad; background: Theme.card-bg;
+                                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                    VerticalLayout {
+                                        padding: 12px; spacing: 6px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text { text: r.title; font-size: 13px; font-weight: 700; color: Theme.fg; overflow: elide; horizontal-stretch: 1; }
+                                            Text { text: r.meta; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
+                                        }
+                                        // words — read-only, selectable (capture-card pattern, no menu)
+                                        Rectangle {
+                                            height: 34px;
+                                            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                            border-radius: Theme.rad;
+                                            background: Theme.name == "win95" ? #ffffff : Theme.pan-bg;
+                                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
+                                            lrsv := ScrollView {
+                                                x: 8px; y: 4px; width: parent.width - 16px; height: parent.height - 8px;
+                                                viewport-width: self.visible-width;
+                                                viewport-height: max(self.visible-height, lrti.preferred-height);
+                                                lrti := TextInput {
+                                                    page-height: lrsv.visible-height;
+                                                    text: r.text; read-only: true;
+                                                    wrap: word-wrap; single-line: false;
+                                                    font-size: 10.5px; color: Theme.dim; font-family: Theme.font;
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            Rectangle {
+                                                width: 24px; height: 20px; border-radius: Theme.rad;
+                                                background: lbp.has-hover ? Theme.acc-soft : transparent;
+                                                lbp := TouchArea {
+                                                    clicked => {
+                                                        if (player-id == r.id && player-playing) { root.stop(); }
+                                                        else { root.play-hist(r.id); }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: player-id == r.id && player-playing ? "■" : "▶";
+                                                    font-size: 11px;
+                                                    color: player-id == r.id && player-playing ? Theme.acc : Theme.dim;
+                                                    horizontal-alignment: center; vertical-alignment: center;
+                                                }
+                                            }
+                                            Rectangle {
+                                                width: 24px; height: 20px; border-radius: Theme.rad;
+                                                background: lbs.has-hover ? Theme.acc-soft : transparent;
+                                                lbs := TouchArea { clicked => { root.star-hist(r.id, !r.starred); } }
+                                                Text { text: r.starred ? "★" : "☆"; font-size: 11px; color: r.starred ? Theme.acc : Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            Rectangle {
+                                                width: 24px; height: 20px; border-radius: Theme.rad;
+                                                background: lbe.has-hover ? Theme.acc-soft : transparent;
+                                                lbe := TouchArea { clicked => { root.export-audio(r.id); } }
+                                                Text { text: "⇩"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            Rectangle {
+                                                width: 24px; height: 20px; border-radius: Theme.rad;
+                                                background: lbk.has-hover ? Theme.acc-soft : transparent;
+                                                lbk := TouchArea { clicked => { root.export-package(r.id); } }
+                                                Text { text: "⇪"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            Rectangle {
+                                                width: 24px; height: 20px; border-radius: Theme.rad;
+                                                background: lbf.has-hover ? Theme.acc-soft : transparent;
+                                                lbf := TouchArea { clicked => { root.fx-id = r.id; root.fx-voice = r.title; root.fx-index = 0; } }
+                                                Text { text: "✧"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            Rectangle {
+                                                width: 24px; height: 20px; border-radius: Theme.rad;
+                                                background: lbt.has-hover ? Theme.acc-soft : transparent;
+                                                lbt := TouchArea {
+                                                    clicked => {
+                                                        lib-tag-id = r.id;
+                                                        lib-tag-title = r.title;
+                                                        lib-tag-value = r.tags;
+                                                    }
+                                                }
+                                                Text { text: "#"; font-size: 11px; font-weight: 700; color: r.tags != "" ? Theme.acc : Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            Rectangle {
+                                                width: 24px; height: 20px; border-radius: Theme.rad;
+                                                background: lbd.has-hover ? Theme.acc-soft : transparent;
+                                                lbd := TouchArea { clicked => { root.delete-hist(r.id); } }
+                                                Text { text: "✕"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            Rectangle { width: 6px; }
+                                            Text {
+                                                text: r.tags == "" ? "" : "# " + r.tags;
+                                                font-size: 10px; font-family: Theme.mono; color: Theme.dim;
+                                                overflow: elide; preferred-width: 0px;
+                                                horizontal-stretch: 1; vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                                if lib-rows.length == 0 : Text {
+                                    text: "— nothing matches —"; font-size: 10.5px; font-family: Theme.mono;
+                                    color: Theme.dim; horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
                     // ---- stub for other tabs ----
                     // whitelist of the still-stubbed tabs — the old exclusion
                     // list silently kept rendering this above shipped views
-                    if tab == "lib" || tab == "settings" : Rectangle {
+                    if tab == "settings" : Rectangle {
                         HorizontalLayout {
                             alignment: center;
                             VerticalLayout {
@@ -2609,6 +2789,35 @@ export component AppWindow inherits Window {
                         label: "Delete"; generate: true; min-width: 110px;
                         clicked => { root.delete-voice(del-id); del-id = ""; del-name = ""; }
                     }
+                }
+            }
+        }
+    }
+
+    // --- library tag editor ---
+    if lib-tag-id != "" : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 420px; height: 172px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px; clip: true;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                Text { text: "Tags — " + lib-tag-title; font-size: 15px; font-weight: 700; color: Theme.fg; overflow: elide; }
+                LabeledInput {
+                    label: "COMMA-SEPARATED"; placeholder: "e.g. demo, piccolo, keeper";
+                    value <=> lib-tag-value; vertical-stretch: 0;
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    spacing: 10px; alignment: end;
+                    TBtn { label: "Cancel"; clicked => { lib-tag-id = ""; } }
+                    TBtn { label: "Save tags"; generate: true; min-width: 110px; clicked => { root.lib-save-tags(); } }
                 }
             }
         }

@@ -185,6 +185,9 @@ pub trait Engine {
     /// Star/unstar a history entry.
     fn star_history(&self, hid: &str, starred: bool) -> zbus::Result<()>;
 
+    /// Replace a history entry's tags (JSON array of strings) — Library labels.
+    fn set_history_tags(&self, hid: &str, tags_json: &str) -> zbus::Result<()>;
+
     /// Delete a history entry (row + audio file).
     fn delete_history(&self, hid: &str) -> zbus::Result<()>;
 

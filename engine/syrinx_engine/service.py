@@ -697,6 +697,17 @@ class EngineInterface(ServiceInterface):
         self._history.set_starred(hid, starred)
 
     @method()
+    async def SetHistoryTags(self, hid: "s", tags_json: "s") -> None:  # noqa: F821
+        """Replace a history row's tags (JSON array of strings)."""
+        try:
+            tags = json.loads(tags_json)
+        except json.JSONDecodeError:
+            return
+        if isinstance(tags, list):
+            cleaned = [str(t).strip() for t in tags if str(t).strip()]
+            self._history.set_tags(hid, cleaned)
+
+    @method()
     async def DeleteHistory(self, hid: "s") -> None:  # noqa: F821
         self._history.delete(hid)
 

@@ -36,6 +36,7 @@ class HistoryItem:
     duration: float
     starred: bool
     created_at: float
+    tags: list = None  # user-defined labels (the Library filters on these)
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +49,9 @@ class HistoryItem:
             "duration": self.duration,
             "starred": self.starred,
             "created_at": self.created_at,
+            "tags": self.tags or [],
+            # display string computed here — the app shows it verbatim
+            "date": time.strftime("%b %d · %H:%M", time.localtime(self.created_at)),
         }
 
 
@@ -79,10 +83,15 @@ class HistoryStore:
                     language TEXT DEFAULT 'en',
                     duration REAL DEFAULT 0,
                     starred INTEGER DEFAULT 0,
-                    created_at REAL
+                    created_at REAL,
+                    tags TEXT DEFAULT ''
                 );
                 """
             )
+            # migrate rows created before tags existed
+            cols = [r[1] for r in c.execute("PRAGMA table_info(history)")]
+            if "tags" not in cols:
+                c.execute("ALTER TABLE history ADD COLUMN tags TEXT DEFAULT ''")
 
     def _rel(self, p: Path) -> str:
         return str(p.relative_to(self._dir))
@@ -132,6 +141,10 @@ class HistoryStore:
     # --- read -----------------------------------------------------------
 
     def _row(self, r: sqlite3.Row) -> HistoryItem:
+        try:
+            tags = json.loads(r["tags"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            tags = []
         return HistoryItem(
             id=r["id"],
             voice_id=r["voice_id"],
@@ -143,6 +156,7 @@ class HistoryStore:
             duration=r["duration"] or 0.0,
             starred=bool(r["starred"]),
             created_at=r["created_at"] or 0.0,
+            tags=tags if isinstance(tags, list) else [],
         )
 
     def list(self) -> list[HistoryItem]:
@@ -174,6 +188,10 @@ class HistoryStore:
     def set_starred(self, hid: str, starred: bool) -> None:
         with self._conn() as c:
             c.execute("UPDATE history SET starred=? WHERE id=?", (1 if starred else 0, hid))
+
+    def set_tags(self, hid: str, tags: list) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE history SET tags=? WHERE id=?", (json.dumps(tags), hid))
 
     def delete(self, hid: str) -> None:
         item = self.get(hid)

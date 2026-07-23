@@ -67,6 +67,10 @@ enum Cmd {
     VcDeleteClip { id: String },
     VcArmClip { id: String },
     VcAudition { id: String },
+    // library (▤ tab)
+    LibLoad,
+    LibRefilter { q: String, type_idx: i32, voice_idx: i32, starred: bool },
+    LibSaveTags { id: String, csv: String },
     // voices tab (profile table + inspector)
     VoicesLoad,
     VoicesSearch { q: String },
@@ -308,6 +312,35 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_cv_cancel(move || { let _ = tx.send(Cmd::CvCancel); });
+    }
+    // Library view.
+    {
+        let tx = tx.clone();
+        ui.on_lib_open(move || { let _ = tx.send(Cmd::LibLoad); });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_lib_refilter(move || {
+            let ui = ui_weak.unwrap();
+            let _ = tx.send(Cmd::LibRefilter {
+                q: ui.get_lib_search().to_string(),
+                type_idx: ui.get_lib_type_index(),
+                voice_idx: ui.get_lib_voice_index(),
+                starred: ui.get_lib_starred_only(),
+            });
+        });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_lib_save_tags(move || {
+            let ui = ui_weak.unwrap();
+            let _ = tx.send(Cmd::LibSaveTags {
+                id: ui.get_lib_tag_id().to_string(),
+                csv: ui.get_lib_tag_value().to_string(),
+            });
+        });
     }
     {
         let tx = tx.clone();
@@ -1423,6 +1456,108 @@ fn build_captures(json: &str) -> Vec<CaptureItem> {
         .collect()
 }
 
+/// One library row's backing data (the slint model is derived per filter).
+struct LibRow {
+    id: String,
+    title: String,
+    meta: String,
+    text: String,
+    starred: bool,
+    tags: Vec<String>,
+    voice: String, // ♫-stripped first title segment, for the voice filter
+    kind: u8,      // 0 = TTS, 1 = speech VC, 2 = music
+    blob: String,  // lowercased title+text+tags, for search
+}
+
+/// Fetch and classify all generations for the Library.
+async fn lib_load(proxy: &EngineProxy<'_>) -> (Vec<LibRow>, Vec<String>) {
+    let j = proxy.list_history().await.unwrap_or_else(|_| "[]".into());
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&j).unwrap_or_default();
+    let mut rows = Vec::new();
+    let mut voices: Vec<String> = Vec::new();
+    for h in &arr {
+        let s = |k: &str| h.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = {
+            let n = s("voice_name");
+            if n.is_empty() { s("voice_id") } else { n }
+        };
+        let engine = s("engine");
+        let first_seg = title.split(" · ").next().unwrap_or("").trim().to_string();
+        let kind = if is_vc_engine(&engine) {
+            if first_seg.ends_with('♫') { 2 } else { 1 }
+        } else {
+            0
+        };
+        let voice = first_seg.trim_end_matches('♫').trim().to_string();
+        let dur = h.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let tags: Vec<String> = h
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let text = s("text");
+        let meta = format!(
+            "{} · {} · {} · {}",
+            ["TTS", "⇄ VC", "♫ VC"][kind as usize],
+            fmt_dur(dur), s("language"), s("date"),
+        );
+        let blob = format!("{} {} {}", title, text, tags.join(" ")).to_lowercase();
+        if !voice.is_empty() && !voices.contains(&voice) {
+            voices.push(voice.clone());
+        }
+        rows.push(LibRow {
+            id: s("id"), title, meta, text,
+            starred: h.get("starred").and_then(|v| v.as_bool()).unwrap_or(false),
+            tags, voice, kind, blob,
+        });
+    }
+    voices.sort();
+    (rows, voices)
+}
+
+/// Apply the current filters and push the derived model + count line.
+fn lib_apply(
+    ui: &slint::Weak<AppWindow>,
+    rows: &[LibRow],
+    voices: &[String],
+    filters: &(String, i32, i32, bool),
+) {
+    let (q, type_idx, voice_idx, starred_only) = filters;
+    let q = q.trim().to_lowercase();
+    let want_voice = if *voice_idx > 0 {
+        voices.get((*voice_idx - 1) as usize).cloned()
+    } else {
+        None
+    };
+    let shown: Vec<LibItem> = rows
+        .iter()
+        .filter(|r| q.is_empty() || r.blob.contains(&q))
+        .filter(|r| *type_idx == 0 || r.kind == (*type_idx - 1) as u8)
+        .filter(|r| want_voice.as_deref().is_none_or(|v| r.voice == v))
+        .filter(|r| !*starred_only || r.starred)
+        .map(|r| LibItem {
+            id: r.id.clone().into(),
+            title: r.title.clone().into(),
+            meta: r.meta.clone().into(),
+            text: r.text.clone().into(),
+            starred: r.starred,
+            tags: r.tags.join(", ").into(),
+        })
+        .collect();
+    let count = format!("{} of {} generations", shown.len(), rows.len());
+    let names: Vec<SharedString> = std::iter::once(SharedString::from("All voices"))
+        .chain(voices.iter().map(|v| SharedString::from(v.as_str())))
+        .collect();
+    let voice_count = names.len() as i32;
+    ui.upgrade_in_event_loop(move |ui| {
+        if ui.get_lib_voice_index() >= voice_count { ui.set_lib_voice_index(0); }
+        ui.set_lib_voice_names(ModelRc::from(Rc::new(VecModel::from(names))));
+        ui.set_lib_rows(ModelRc::from(Rc::new(VecModel::from(shown))));
+        ui.set_lib_count_line(count.into());
+    })
+    .ok();
+}
+
 /// Refresh the ⇄ tab's saved-clip rail; returns (id, name, path) rows the
 /// worker keeps for arming/audition/deletion by id.
 async fn refresh_vc_clips(
@@ -1662,6 +1797,11 @@ async fn worker(
     let mut vc_audition_id = String::new();         // clip id or "scratch" being played
     let mut pending_vc_tr: u32 = 0;                 // source auto-transcription req id
     let mut vc_tr_clip = String::new();             // saved clip awaiting transcript backfill
+    // library (▤) state — rows cached, filters applied app-side
+    let mut lib_rows: Vec<LibRow> = Vec::new();
+    let mut lib_voices: Vec<String> = Vec::new();
+    let mut lib_loaded = false;
+    let mut lib_filters: (String, i32, i32, bool) = (String::new(), 0, 0, false);
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -2025,6 +2165,12 @@ async fn worker(
                     if let Err(e) = proxy.star_history(&id, on).await {
                         tracing::error!("star_history failed: {e}");
                     }
+                    if lib_loaded {
+                        let (rows, voices) = lib_load(&proxy).await;
+                        lib_rows = rows;
+                        lib_voices = voices;
+                        lib_apply(&ui, &lib_rows, &lib_voices, &lib_filters);
+                    }
                 }
                 Some(Cmd::Delete { id }) => {
                     if let Err(e) = proxy.delete_history(&id).await {
@@ -2033,6 +2179,12 @@ async fn worker(
                     if let Ok(json) = proxy.list_history().await {
                         let items = build_history(&json);
                         ui.upgrade_in_event_loop(move |ui| set_history_model(&ui, items)).ok();
+                    }
+                    if lib_loaded {
+                        let (rows, voices) = lib_load(&proxy).await;
+                        lib_rows = rows;
+                        lib_voices = voices;
+                        lib_apply(&ui, &lib_rows, &lib_voices, &lib_filters);
                     }
                 }
                 Some(Cmd::Regenerate { id }) => {
@@ -3024,6 +3176,33 @@ async fn worker(
                             }
                         }
                     }
+                }
+                Some(Cmd::LibLoad) => {
+                    let (rows, voices) = lib_load(&proxy).await;
+                    lib_rows = rows;
+                    lib_voices = voices;
+                    lib_loaded = true;
+                    lib_apply(&ui, &lib_rows, &lib_voices, &lib_filters);
+                }
+                Some(Cmd::LibRefilter { q, type_idx, voice_idx, starred }) => {
+                    lib_filters = (q, type_idx, voice_idx, starred);
+                    lib_apply(&ui, &lib_rows, &lib_voices, &lib_filters);
+                }
+                Some(Cmd::LibSaveTags { id, csv }) => {
+                    let tags: Vec<String> = csv
+                        .split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect();
+                    let json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".into());
+                    if let Err(e) = proxy.set_history_tags(&id, &json).await {
+                        tracing::error!("set tags failed: {e}");
+                    }
+                    ui.upgrade_in_event_loop(|ui| ui.set_lib_tag_id("".into())).ok();
+                    let (rows, voices) = lib_load(&proxy).await;
+                    lib_rows = rows;
+                    lib_voices = voices;
+                    lib_apply(&ui, &lib_rows, &lib_voices, &lib_filters);
                 }
                 Some(Cmd::VoicesLoad) => {
                     refresh_voices_table(&ui, &proxy, &mut avatar_cache, &mut voices_all).await;
