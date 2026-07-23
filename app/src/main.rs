@@ -34,6 +34,7 @@ enum Cmd {
     CvCancel,
     Compose { voice_id: String, prompt: String },
     Rewrite { voice_id: String, text: String },
+    ModelsLoad,
     DownloadModel { id: String },
     DeleteModel { id: String },
     ActivateModel { id: String },
@@ -58,6 +59,12 @@ enum Cmd {
     TrRefine { text: String },
     TrSaveCapture { id: String, text: String },
     TrDeleteCapture { id: String },
+    // trim modal (✂ on recordings and history clips)
+    TrimShow { ctx: String },
+    TrimShowHist { hid: String },
+    TrimPreview { start: f64, end: f64 },
+    TrimPreviewStop,
+    TrimApply { start: f64, end: f64 },
     // voice changer (⇄ tab)
     VcLoad,
     VcToggleRecord { system: bool },
@@ -408,6 +415,33 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_lib_open(move || { let _ = tx.send(Cmd::LibLoad); });
+    }
+    // Models view — workers pull weights lazily at first conversion, so the
+    // cached catalog can be stale; re-inspect on every visit.
+    {
+        let tx = tx.clone();
+        ui.on_models_open(move || { let _ = tx.send(Cmd::ModelsLoad); });
+    }
+    // Trim modal (✂ on recordings and history clips).
+    {
+        let tx = tx.clone();
+        ui.on_trim_show(move |ctx| { let _ = tx.send(Cmd::TrimShow { ctx: ctx.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_trim_show_hist(move |hid| { let _ = tx.send(Cmd::TrimShowHist { hid: hid.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_trim_preview(move |s, e| { let _ = tx.send(Cmd::TrimPreview { start: s as f64, end: e as f64 }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_trim_preview_stop(move || { let _ = tx.send(Cmd::TrimPreviewStop); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_trim_apply(move |s, e| { let _ = tx.send(Cmd::TrimApply { start: s as f64, end: e as f64 }); });
     }
     {
         let tx = tx.clone();
@@ -1478,7 +1512,7 @@ fn update_composer_langs(
 /// Update a single model row's download progress in place (no refetch).
 fn set_model_progress(ui: &slint::Weak<AppWindow>, id: String, pct: f32, downloading: bool) {
     ui.upgrade_in_event_loop(move |ui| {
-        for model in [ui.get_voice_models(), ui.get_stt_models(), ui.get_llm_models()] {
+        for model in [ui.get_voice_models(), ui.get_stt_models(), ui.get_llm_models(), ui.get_vc_conv_models()] {
             for i in 0..model.row_count() {
                 if let Some(mut it) = model.row_data(i) {
                     if it.id.as_str() == id {
@@ -1490,6 +1524,36 @@ fn set_model_progress(ui: &slint::Weak<AppWindow>, id: String, pct: f32, downloa
                 }
             }
         }
+    })
+    .ok();
+}
+
+/// Parse a FileEnvelope reply into (bars, duration).
+fn parse_envelope(json: &str) -> Option<(Vec<f32>, f64)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let dur = v.get("duration")?.as_f64()?;
+    let bars: Vec<f32> = v
+        .get("bars")?
+        .as_array()?
+        .iter()
+        .filter_map(|b| b.as_f64().map(|x| x as f32))
+        .collect();
+    if dur <= 0.0 || bars.is_empty() {
+        return None;
+    }
+    Some((bars, dur))
+}
+
+/// Populate and show the trim modal with handles reset to the full clip.
+fn open_trim_modal(ui: &slint::Weak<AppWindow>, title: String, bars: Vec<f32>, dur: f64) {
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_trim_bars(ModelRc::from(Rc::new(VecModel::from(bars))));
+        ui.set_trim_title(title.into());
+        ui.set_trim_duration(dur as f32);
+        ui.set_trim_start(0.0);
+        ui.set_trim_end(1.0);
+        ui.set_trim_playing(false);
+        ui.set_trim_open(true);
     })
     .ok();
 }
@@ -1977,6 +2041,14 @@ async fn worker(
     let mut vc_audition_id = String::new();         // clip id or "scratch" being played
     let mut pending_vc_tr: u32 = 0;                 // source auto-transcription req id
     let mut vc_tr_clip = String::new();             // saved clip awaiting transcript backfill
+    // trim modal state (✂)
+    let mut trim_ctx = String::new();   // "vc" | "cv" | "tr" | "hist"
+    let mut trim_path = String::new();  // audio file under the handles (non-hist)
+    let mut trim_hid = String::new();   // history clip id (hist context)
+    let mut trim_dur = 0.0_f64;         // seconds, from FileEnvelope
+    let mut trim_gen: u32 = 0;          // preview playback generation
+    let mut trim_end_pct = 1.0_f64;     // preview auto-stop point (0..1)
+    let mut tr_source = String::new();  // last transcription source (recording or import)
     // settings (⚙) — shared app config + enumerated capture devices
     let mut cfg = load_config();
     let mut st_mics: Vec<(String, String)> = Vec::new();
@@ -2037,6 +2109,14 @@ async fn worker(
                             if stage.starts_with("done") { ui.set_vc_busy(false); }
                             ui.set_vc_status(stage);
                         }).ok();
+                        // the clip is already saved when auto-play starts —
+                        // surface it in the rail now, not when playback ends
+                        if a.state == "playing" {
+                            if let Ok(j) = proxy.list_history().await {
+                                let items = build_history(&j);
+                                ui.upgrade_in_event_loop(move |ui| set_history_model(&ui, items)).ok();
+                            }
+                        }
                     }
                 }
             }
@@ -2171,6 +2251,12 @@ async fn worker(
             }
             Some(sig) = pprog.next() => {
                 if let Ok(a) = sig.args() {
+                    // trim preview reached the out-handle — stop there
+                    if trim_gen != 0 && a.gen_id == trim_gen && a.pct >= trim_end_pct {
+                        proxy.cancel(trim_gen).await.ok();
+                        trim_gen = 0;
+                        ui.upgrade_in_event_loop(|ui| ui.set_trim_playing(false)).ok();
+                    }
                     if a.gen_id == current_play_gen {
                         last_pct = a.pct;
                         let pct = a.pct as f32;
@@ -2185,6 +2271,11 @@ async fn worker(
             Some(sig) = ended.next() => {
                 let is_current = sig.args().map(|a| a.gen_id == current_play_gen).unwrap_or(false);
                 if is_current { playing = false; }
+                // trim preview ran out (or was cancelled) — flip ▶ back
+                if trim_gen != 0 && sig.args().map(|a| a.gen_id == trim_gen).unwrap_or(false) {
+                    trim_gen = 0;
+                    ui.upgrade_in_event_loop(|ui| ui.set_trim_playing(false)).ok();
+                }
                 // conversion ran its course (played out or errored) — settle the ⇄ tab
                 if pending_vc != 0 && sig.args().map(|a| a.gen_id == pending_vc).unwrap_or(false) {
                     pending_vc = 0;
@@ -2294,9 +2385,11 @@ async fn worker(
                                 Ok(id) => pending_tr = id,
                                 Err(e) => tracing::error!("transcribe failed: {e}"),
                             }
+                            tr_source = tr_wav.clone();
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_tr_recording(false);
                                 ui.set_tr_busy(true);
+                                ui.set_tr_has_source(true);
                                 ui.set_tr_status("transcribing…".into());
                             }).ok();
                         }
@@ -2337,6 +2430,164 @@ async fn worker(
                 Some(Cmd::Cancel { gen_id }) => {
                     let id = if gen_id == 0 { current_gen } else { gen_id };
                     if id != 0 { proxy.cancel(id).await.ok(); }
+                }
+                Some(Cmd::TrimShow { ctx }) => {
+                    let (path, title) = match ctx.as_str() {
+                        "vc" => (vc_source.clone().unwrap_or_default(), "conversion source"),
+                        "cv" => (cv_sample.clone().unwrap_or_default(), "voice sample"),
+                        "tr" => (tr_source.clone(), "transcription source"),
+                        _ => (String::new(), ""),
+                    };
+                    if !path.is_empty() {
+                        if let Ok(j) = proxy.file_envelope(&path).await {
+                            if let Some((bars, dur)) = parse_envelope(&j) {
+                                trim_ctx = ctx;
+                                trim_path = path;
+                                trim_hid.clear();
+                                trim_dur = dur;
+                                open_trim_modal(&ui, title.to_string(), bars, dur);
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::TrimShowHist { hid }) => {
+                    let path = proxy.history_audio_path(&hid).await.unwrap_or_default();
+                    if !path.is_empty() {
+                        if let Ok(j) = proxy.file_envelope(&path).await {
+                            if let Some((bars, dur)) = parse_envelope(&j) {
+                                trim_ctx = "hist".into();
+                                trim_hid = hid;
+                                trim_path = path;
+                                trim_dur = dur;
+                                open_trim_modal(&ui, "history clip".to_string(), bars, dur);
+                            }
+                        }
+                    }
+                }
+                Some(Cmd::TrimPreview { start, end }) => {
+                    if trim_gen != 0 { proxy.cancel(trim_gen).await.ok(); }
+                    let gid = if trim_ctx == "hist" {
+                        proxy.play_history_at(&trim_hid, start).await.unwrap_or(0)
+                    } else {
+                        proxy.play_file_at(&trim_path, "trim preview", start).await.unwrap_or(0)
+                    };
+                    trim_gen = gid;
+                    trim_end_pct = end;
+                    if gid != 0 {
+                        ui.upgrade_in_event_loop(|ui| ui.set_trim_playing(true)).ok();
+                    }
+                }
+                Some(Cmd::TrimPreviewStop) => {
+                    if trim_gen != 0 {
+                        proxy.cancel(trim_gen).await.ok();
+                        trim_gen = 0;
+                    }
+                    ui.upgrade_in_event_loop(|ui| ui.set_trim_playing(false)).ok();
+                }
+                Some(Cmd::TrimApply { start, end }) => {
+                    if trim_gen != 0 {
+                        proxy.cancel(trim_gen).await.ok();
+                        trim_gen = 0;
+                    }
+                    let (start_s, end_s) = (start * trim_dur, end * trim_dur);
+                    if trim_ctx == "hist" {
+                        let ok = proxy
+                            .trim_history_clip(&trim_hid, start_s, end_s)
+                            .await
+                            .unwrap_or(false);
+                        let refreshed = if ok {
+                            proxy.list_history().await.ok().map(|j| build_history(&j))
+                        } else {
+                            None
+                        };
+                        let hid = trim_hid.clone();
+                        ui.upgrade_in_event_loop(move |ui| {
+                            if let Some(items) = refreshed {
+                                set_history_model(&ui, items);
+                                // the bar's waveform/duration are stale for
+                                // this clip — hide it; replay reopens fresh
+                                if ui.get_player_id().as_str() == hid {
+                                    ui.set_player_active(false);
+                                }
+                            }
+                            ui.set_trim_open(false);
+                        }).ok();
+                    } else {
+                        match proxy.trim_audio(&trim_path, start_s, end_s).await {
+                            Ok(p) if !p.is_empty() => match trim_ctx.as_str() {
+                                "vc" => {
+                                    vc_source = Some(p.clone());
+                                    // a saved armed clip was rewritten in place:
+                                    // clear its cache and route the fresh
+                                    // transcript back into it (backfill path)
+                                    vc_tr_clip = vc_clips_data
+                                        .iter()
+                                        .find(|(_, _, cpath, _)| *cpath == p)
+                                        .map(|(cid, _, _, _)| cid.clone())
+                                        .unwrap_or_default();
+                                    if !vc_tr_clip.is_empty() {
+                                        proxy.set_source_clip_transcript(&vc_tr_clip, "").await.ok();
+                                        if let Some(row) = vc_clips_data
+                                            .iter_mut()
+                                            .find(|(cid, _, _, _)| *cid == vc_tr_clip)
+                                        {
+                                            row.3.clear();
+                                        }
+                                    }
+                                    match proxy.transcribe_file(&p).await {
+                                        Ok(id) if id != 0 => pending_vc_tr = id,
+                                        _ => vc_tr_clip.clear(),
+                                    }
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_vc_transcript("".into());
+                                        ui.set_vc_transcribing(true);
+                                        ui.set_trim_open(false);
+                                    }).ok();
+                                }
+                                "cv" => {
+                                    cv_sample = Some(p.clone());
+                                    let label = recorded_label(&p);
+                                    ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_cv_sample_label(label.into());
+                                        ui.set_cv_transcribing(true);
+                                        ui.set_trim_open(false);
+                                    }).ok();
+                                    // same inline transcribe the modal's button runs
+                                    let result = proxy.transcribe(&p).await;
+                                    ui.upgrade_in_event_loop(move |ui| {
+                                        ui.set_cv_transcribing(false);
+                                        if let Ok(text) = result {
+                                            ui.set_cv_transcript(text.into());
+                                        }
+                                    }).ok();
+                                }
+                                "tr" => {
+                                    tr_source = p.clone();
+                                    match proxy.transcribe_file(&p).await {
+                                        Ok(id) => {
+                                            pending_tr = id;
+                                            ui.upgrade_in_event_loop(|ui| {
+                                                ui.set_tr_text("".into());
+                                                ui.set_tr_busy(true);
+                                                ui.set_tr_status("transcribing…".into());
+                                                ui.set_trim_open(false);
+                                            }).ok();
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("post-trim transcribe failed: {e}");
+                                            ui.upgrade_in_event_loop(|ui| ui.set_trim_open(false)).ok();
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    ui.upgrade_in_event_loop(|ui| ui.set_trim_open(false)).ok();
+                                }
+                            },
+                            _ => {
+                                ui.upgrade_in_event_loop(|ui| ui.set_trim_open(false)).ok();
+                            }
+                        }
+                    }
                 }
                 Some(Cmd::Play { id }) => {
                     match proxy.play_history(&id).await {
@@ -2655,6 +2906,11 @@ async fn worker(
                             }
                         }
                     }
+                }
+                Some(Cmd::ModelsLoad) => {
+                    let r = refresh_models(&ui, &proxy).await;
+                    voice_models = r.0;
+                    active_engine = r.1;
                 }
                 Some(Cmd::DownloadModel { id }) => {
                     match proxy.download_model(&id).await {
@@ -2977,9 +3233,11 @@ async fn worker(
                             match proxy.transcribe_file(&tr_wav).await {
                                 Ok(id) => {
                                     pending_tr = id;
+                                    tr_source = tr_wav.clone();
                                     ui.upgrade_in_event_loop(|ui| {
                                         ui.set_tr_recording(false);
                                         ui.set_tr_busy(true);
+                                        ui.set_tr_has_source(true);
                                         ui.set_tr_status("transcribing…".into());
                                     }).ok();
                                 }
@@ -3039,10 +3297,12 @@ async fn worker(
                         match proxy.transcribe_file(&path).await {
                             Ok(id) => {
                                 pending_tr = id;
+                                tr_source = path.clone();
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_tr_text("".into());
                                     ui.set_tr_capture_id("".into()); // fresh source = new capture
                                     ui.set_tr_busy(true);
+                                    ui.set_tr_has_source(true);
                                     ui.set_tr_status("transcribing…".into());
                                 }).ok();
                             }
@@ -3244,6 +3504,9 @@ async fn worker(
                         match proxy.convert_voice(&src, &pid, engine, &label, &transcript, &mode).await {
                             Ok(gid) if gid != 0 => {
                                 pending_vc = gid;
+                                // the rail's ■ and the player bar stop via
+                                // Cancel{0} → current_gen; track it here too
+                                current_gen = gid;
                                 pending_vc_music = mode == "music";
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_vc_busy(true);

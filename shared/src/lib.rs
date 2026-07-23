@@ -200,6 +200,22 @@ pub trait Engine {
     /// Absolute WAV path of a history entry (for the app to copy on export-audio).
     fn history_audio_path(&self, hid: &str) -> zbus::Result<String>;
 
+    // --- trim (✂ on recordings and history clips) ------------------------
+
+    /// Waveform bars + duration of any local audio file as JSON
+    /// (`{"bars": [...], "duration": secs}`) — the trim modal's display.
+    fn file_envelope(&self, path: &str) -> zbus::Result<String>;
+
+    /// Cut a recording to [start_s, end_s); returns the resulting path
+    /// (in-place for WAVs, a sibling wav otherwise; "" on failure).
+    fn trim_audio(&self, path: &str, start_s: f64, end_s: f64) -> zbus::Result<String>;
+
+    /// Cut a history clip in place; its duration column follows.
+    fn trim_history_clip(&self, hid: &str, start_s: f64, end_s: f64) -> zbus::Result<bool>;
+
+    /// PlayFile starting at a fraction (0..1) — trim-preview playback.
+    fn play_file_at(&self, path: &str, title: &str, pct: f64) -> zbus::Result<u32>;
+
     // --- transcription captures (text only, persisted) -------------------
 
     /// Save a transcript as a capture; returns the new capture id ("" if empty).

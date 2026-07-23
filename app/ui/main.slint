@@ -565,6 +565,7 @@ component PlayerBar inherits Rectangle {
     callback seek(float);
     callback toggle-loop(bool);
     callback set-volume(float);
+    callback trim();   // ✂ — only offered for history clips (p-id != "")
     callback close();
     height: 52px;
     border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -638,6 +639,15 @@ component PlayerBar inherits Rectangle {
                 size: 26px; glyph-size: 12px; glyph: "⟳"; active: p-loop;
                 tip: p-loop ? "Looping" : "Loop";
                 clicked => { p-loop = !p-loop; root.toggle-loop(p-loop); }
+            }
+        }
+        // trim — history clips only (file auditions have no row to keep)
+        if p-id != "" : VerticalLayout {
+            alignment: center;
+            IconBtn {
+                size: 26px; glyph-size: 12px; glyph: "✂";
+                tip: "Trim clip";
+                clicked => { root.trim(); }
             }
         }
         // volume: mute toggle + slider
@@ -879,6 +889,21 @@ export component AppWindow inherits Window {
     callback tr-toggle-record(string);  // "mic" | "system"
     callback tr-pick-file();
     callback vc-open();                 // refresh the target-voice + clip lists
+    callback models-open();             // re-inspect the catalog (workers download weights lazily)
+    // trim modal (✂ on recordings and history clips)
+    in-out property <bool> trim-open;
+    in property <string> trim-title;
+    in property <[float]> trim-bars;
+    in property <float> trim-duration;        // seconds
+    in-out property <float> trim-start: 0.0;  // 0..1 of the clip
+    in-out property <float> trim-end: 1.0;
+    in property <bool> trim-playing;
+    in property <bool> tr-has-source;         // a transcription recording/import exists
+    callback trim-show(string);               // context: "vc" | "cv" | "tr"
+    callback trim-show-hist(string);          // history clip id
+    callback trim-preview(float, float);      // audition [start, end]
+    callback trim-preview-stop();
+    callback trim-apply(float, float);
     callback vc-toggle-record(string);  // "mic" | "system"
     callback vc-pick-file();
     callback vc-convert(int);           // index into vc-voice-names
@@ -1002,7 +1027,7 @@ export component AppWindow inherits Window {
                         hover-changed(on, y) => { nav-tip = on ? "Voice Converter" : ""; nav-tip-y = y; } } }
                     HorizontalLayout { alignment: center; NavIcon { glyph: "▤"; active: tab == "lib"; clicked => { tab = "lib"; root.lib-open(); }
                         hover-changed(on, y) => { nav-tip = on ? "Library" : ""; nav-tip-y = y; } } }
-                    HorizontalLayout { alignment: center; NavIcon { glyph: "◈"; active: tab == "models"; clicked => { tab = "models"; }
+                    HorizontalLayout { alignment: center; NavIcon { glyph: "◈"; active: tab == "models"; clicked => { tab = "models"; root.models-open(); }
                         hover-changed(on, y) => { nav-tip = on ? "Models" : ""; nav-tip-y = y; } } }
                     Rectangle {}
                     HorizontalLayout { alignment: center; NavIcon { glyph: "⚙"; active: tab == "settings"; clicked => { tab = "settings"; root.settings-open(); }
@@ -1302,6 +1327,7 @@ export component AppWindow inherits Window {
                                 seek(p) => { root.seek(player-id, p); }
                                 toggle-loop(on) => { root.toggle-loop(on); }
                                 set-volume(v) => { root.set-volume(v); }
+                                trim => { root.trim-show-hist(player-id); }
                                 close => { player-active-visible = false; }
                             }
                         }
@@ -1646,17 +1672,6 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                // working marquee while transcribing / refining
-                                if tr-busy : Rectangle {
-                                    x: 12px; width: parent.width - 24px;
-                                    y: parent.height - 10px; height: 4px;
-                                    border-radius: 2px; background: Theme.chip-bg; clip: true;
-                                    Rectangle {
-                                        height: 100%; width: parent.width * 0.35;
-                                        border-radius: 2px; background: Theme.gen-bg;
-                                        x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
-                                    }
-                                }
                                 trmenu := PopupWindow {
                                     x: parent.ctx-x; y: parent.ctx-y;
                                     width: 150px; height: 120px;
@@ -1676,6 +1691,16 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                            // indeterminate "working" bar while transcribing / refining —
+                            // same looping marquee as the composer
+                            if tr-busy : Rectangle {
+                                height: 4px; border-radius: 2px; background: Theme.chip-bg; clip: true;
+                                Rectangle {
+                                    height: 100%; width: parent.width * 0.35;
+                                    border-radius: 2px; background: Theme.gen-bg;
+                                    x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
+                                }
+                            }
                             // actions
                             HorizontalLayout {
                                 spacing: 10px;
@@ -1685,6 +1710,10 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                                 Rectangle {}
+                                if tr-has-source : TBtn {
+                                    label: "✂ Trim";
+                                    clicked => { if (!tr-busy && !tr-recording) { root.trim-show("tr"); } }
+                                }
                                 TBtn {
                                     label: tr-capture-id == "" ? "▤ Save capture" : "▤ Update capture";
                                     clicked => { if (!tr-busy && tr-text != "") { root.tr-save-capture(); } }
@@ -1856,6 +1885,14 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                                TBtn {
+                                    label: "✂ Trim";
+                                    clicked => {
+                                        if (vc-has-source && !vc-recording && !vc-busy && !vc-transcribing) {
+                                            root.trim-show("vc");
+                                        }
+                                    }
+                                }
                             }
                             // persist the armed clip (hidden once it's already stored)
                             if vc-has-source && !vc-armed-saved : HorizontalLayout {
@@ -1981,6 +2018,15 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                            // indeterminate "working" bar — same looping marquee as the composer
+                            if vc-busy : Rectangle {
+                                height: 4px; border-radius: 2px; background: Theme.chip-bg; clip: true;
+                                Rectangle {
+                                    height: 100%; width: parent.width * 0.35;
+                                    border-radius: 2px; background: Theme.gen-bg;
+                                    x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
+                                }
+                            }
                             if vc-voice-names.length == 0 : Text {
                                 text: "No cloned voices yet — create one first (✦ Create voice in Text to Speech).";
                                 font-size: 11px; font-family: Theme.mono;
@@ -2003,6 +2049,22 @@ export component AppWindow inherits Window {
                                     vecta := TouchArea { clicked => { vecti.select-all(); vecti.copy(); } }
                                     Text { text: "⧉"; font-size: 10px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
                                 }
+                            }
+                            // the same bottom player the TTS and Library views show —
+                            // appears live the moment a finished conversion auto-plays
+                            if player-active && player-active-visible : PlayerBar {
+                                p-id: player-id; p-title: player-title; p-time: player-time;
+                                p-bars: player-bars; p-playing: player-playing;
+                                p-paused <=> player-paused; p-loop <=> player-loop;
+                                p-volume <=> player-volume; p-pct <=> play-pct;
+                                play => { root.play-hist(player-id); }
+                                pause => { root.pause(); }
+                                resume => { root.resume(); }
+                                seek(p) => { root.seek(player-id, p); }
+                                toggle-loop(on) => { root.toggle-loop(on); }
+                                set-volume(v) => { root.set-volume(v); }
+                                trim => { root.trim-show-hist(player-id); }
+                                close => { player-active-visible = false; }
                             }
                             Text {
                                 text: vc-mode == "music"
@@ -2241,6 +2303,7 @@ export component AppWindow inherits Window {
                             seek(p) => { root.seek(player-id, p); }
                             toggle-loop(on) => { root.toggle-loop(on); }
                             set-volume(v) => { root.set-volume(v); }
+                            trim => { root.trim-show-hist(player-id); }
                             close => { player-active-visible = false; }
                         }
                     }
@@ -2811,6 +2874,10 @@ export component AppWindow inherits Window {
                             spacing: 10px;
                             Text { text: "TRANSCRIPT"; font-size: 11px; font-weight: 700; color: Theme.dim; vertical-alignment: center; }
                             Rectangle {}
+                            if cv-sample-label != "" && !cv-recording : TBtn {
+                                label: "✂ Trim";
+                                clicked => { if (!cv-transcribing) { root.trim-show("cv"); } }
+                            }
                             TBtn { label: cv-transcribing ? "Transcribing…" : "Transcribe"; clicked => { root.cv-transcribe(); } }
                         }
                         Rectangle {
@@ -3191,6 +3258,102 @@ export component AppWindow inherits Window {
                         if fxe-can-delete : TBtn { label: "✕ Delete"; clicked => { root.fxe-delete(); } }
                         TBtn { label: "▤ Save"; generate: true; clicked => { root.fxe-save(); } }
                         TBtn { label: "Close"; clicked => { fxe-open = false; } }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- trim dialog: drag the handles, audition the selection, apply ---
+    if trim-open : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 580px; height: 236px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                Text { text: "✂ Trim — " + trim-title; font-size: 15px; font-weight: 700; color: Theme.fg; overflow: elide; }
+                Text { text: "Drag on the waveform to move the nearest handle — the lit region is what's kept."; font-size: 11px; color: Theme.dim; }
+                // waveform + selection handles
+                Rectangle {
+                    height: 72px; border-radius: Theme.rad; background: Theme.chip-bg; clip: true;
+                    HorizontalLayout {
+                        padding-left: 4px; padding-right: 4px; spacing: 0px;
+                        for b[i] in trim-bars : Rectangle {
+                            horizontal-stretch: 1;
+                            Rectangle {
+                                width: parent.width * 0.66;
+                                height: max(2px, b * 58px);
+                                y: (parent.height - self.height) / 2;
+                                border-radius: self.width / 2;
+                                background: i >= trim-start * trim-bars.length && i < trim-end * trim-bars.length
+                                    ? Theme.wave : Theme.wave-dim;
+                            }
+                        }
+                    }
+                    Rectangle { x: trim-start * parent.width - 1px; width: 2px; height: 100%; background: Theme.acc; }
+                    Rectangle { x: trim-end * parent.width - 1px; width: 2px; height: 100%; background: Theme.acc; }
+                    trimta := TouchArea {
+                        // whichever handle is nearer to the press follows the drag
+                        property <bool> drag-end;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                drag-end = trimta.mouse-x / self.width > (trim-start + trim-end) / 2;
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                if (drag-end) {
+                                    trim-end = max(trim-start + 0.02, min(1.0, trimta.mouse-x / self.width));
+                                } else {
+                                    trim-start = max(0.0, min(trim-end - 0.02, trimta.mouse-x / self.width));
+                                }
+                            }
+                        }
+                        clicked => {
+                            if (drag-end) {
+                                trim-end = max(trim-start + 0.02, min(1.0, trimta.mouse-x / self.width));
+                            } else {
+                                trim-start = max(0.0, min(trim-end - 0.02, trimta.mouse-x / self.width));
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    Text {
+                        text: "in " + round(trim-start * trim-duration * 10) / 10 + "s";
+                        font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                    }
+                    Rectangle {}
+                    Text {
+                        text: "keeps " + round((trim-end - trim-start) * trim-duration * 10) / 10 + "s of " + round(trim-duration * 10) / 10 + "s";
+                        font-size: 10.5px; font-family: Theme.mono; color: Theme.fg;
+                    }
+                    Rectangle {}
+                    Text {
+                        text: "out " + round(trim-end * trim-duration * 10) / 10 + "s";
+                        font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    TBtn {
+                        label: trim-playing ? "■ Stop" : "▶ Selection";
+                        clicked => {
+                            if (trim-playing) { root.trim-preview-stop(); }
+                            else { root.trim-preview(trim-start, trim-end); }
+                        }
+                    }
+                    Rectangle {}
+                    TBtn { label: "Cancel"; clicked => { root.trim-preview-stop(); trim-open = false; } }
+                    TBtn {
+                        label: "✂ Apply"; generate: true;
+                        clicked => { root.trim-apply(trim-start, trim-end); }
                     }
                 }
             }

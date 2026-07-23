@@ -185,6 +185,32 @@ class HistoryStore:
 
     # --- mutate ---------------------------------------------------------
 
+    def trim(self, hid: str, start_s: float, end_s: float) -> bool:
+        """Cut a clip's audio to [start_s, end_s) in place; the row keeps its
+        text/tags/star and the duration column follows the new length."""
+        item = self.get(hid)
+        if not item:
+            return False
+        path = self._abs(item.audio_path)
+        if not path.exists():
+            return False
+        with wave.open(str(path), "rb") as w:
+            rate = w.getframerate()
+            frames = w.readframes(w.getnframes())
+        a = max(0, int(start_s * rate)) * 2  # PCM16 mono: 2 bytes/frame
+        b = min(len(frames), int(end_s * rate) * 2)
+        if b - a < int(0.1 * rate) * 2:
+            return False
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(frames[a:b])
+        duration = (b - a) / 2 / rate
+        with self._conn() as c:
+            c.execute("UPDATE history SET duration=? WHERE id=?", (duration, hid))
+        return True
+
     def set_starred(self, hid: str, starred: bool) -> None:
         with self._conn() as c:
             c.execute("UPDATE history SET starred=? WHERE id=?", (1 if starred else 0, hid))

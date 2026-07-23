@@ -773,10 +773,7 @@ class EngineInterface(ServiceInterface):
     async def DeleteSourceClip(self, clip_id: "s") -> None:  # noqa: F821
         self._srcclips.delete(clip_id)
 
-    @method()
-    async def PlayFile(self, path: "s", title: "s") -> "u":  # noqa: F821
-        """Audition any local audio file through the normal player (0 if
-        unreadable). Used by the ⇄ tab to verify sources before converting."""
+    def _play_file(self, path: str, title: str, start_pct: float = 0.0) -> int:
         try:
             pcm, rate = effects.load_wav(path)
         except Exception:  # noqa: BLE001
@@ -792,7 +789,7 @@ class EngineInterface(ServiceInterface):
             try:
                 self.SpeakStarted(gen_id)
                 await self._play(
-                    gen_id, pcm, rate,
+                    gen_id, pcm, rate, start_pct=start_pct,
                     on_start=lambda: self.PlaybackInfo(gen_id, "", title, duration, bars),
                 )
             except asyncio.CancelledError:
@@ -805,6 +802,63 @@ class EngineInterface(ServiceInterface):
 
         self._tasks[gen_id] = asyncio.create_task(run())
         return gen_id
+
+    @method()
+    async def PlayFile(self, path: "s", title: "s") -> "u":  # noqa: F821
+        """Audition any local audio file through the normal player (0 if
+        unreadable). Used by the ⇄ tab to verify sources before converting."""
+        return self._play_file(path, title)
+
+    @method()
+    async def PlayFileAt(self, path: "s", title: "s", pct: "d") -> "u":  # noqa: F821
+        """PlayFile from a fraction (0..1) of the way in — the trim modal's
+        selection preview (the app cancels when the end handle is reached)."""
+        return self._play_file(path, title, start_pct=max(0.0, min(1.0, pct)))
+
+    @method()
+    async def FileEnvelope(self, path: "s") -> "s":  # noqa: F821
+        """Waveform bars + duration of any local audio file, as JSON
+        {"bars": [...], "duration": secs} — the trim modal's display."""
+        try:
+            pcm, rate = effects.load_wav(path)
+        except Exception:  # noqa: BLE001
+            log.exception("FileEnvelope: unreadable %s", path)
+            return "{}"
+        return json.dumps({
+            "bars": audio.envelope(pcm),
+            "duration": audio.duration_of(pcm, rate),
+        })
+
+    @method()
+    async def TrimAudio(self, path: "s", start_s: "d", end_s: "d") -> "s":  # noqa: F821
+        """Cut a recording down to [start_s, end_s). WAVs are rewritten in
+        place (PCM16 mono, rate kept); other formats get a sibling
+        "<stem>-trimmed.wav". Returns the resulting path — "" on failure or
+        a selection shorter than 0.1 s."""
+        try:
+            import soundfile as sf
+
+            data, rate = sf.read(path, dtype="float32")
+            if getattr(data, "ndim", 1) > 1:
+                data = data.mean(axis=1)
+            a = max(0, int(start_s * rate))
+            b = min(len(data), int(end_s * rate))
+            if b - a < int(0.1 * rate):
+                return ""
+            out = Path(path)
+            if out.suffix.lower() != ".wav":
+                out = out.with_name(out.stem + "-trimmed.wav")
+            sf.write(str(out), data[a:b], int(rate), subtype="PCM_16")
+            return str(out)
+        except Exception:  # noqa: BLE001
+            log.exception("TrimAudio %s failed", path)
+            return ""
+
+    @method()
+    async def TrimHistoryClip(self, hid: "s", start_s: "d", end_s: "d") -> "b":  # noqa: F821
+        """Cut a history clip to [start_s, end_s) in place — duration
+        updates; text, tags and stars stay."""
+        return self._history.trim(hid, start_s, end_s)
 
     # --- engine settings (the ⚙ tab's knobs) -----------------------------
 
