@@ -298,6 +298,7 @@ class SourceClipItem:
     duration: float
     created_at: float
     path: str  # absolute — the app arms it directly as a conversion source
+    transcript: str  # cached whisper output — re-arming skips re-transcription
 
     def to_dict(self) -> dict:
         mins, secs = divmod(int(round(self.duration)), 60)
@@ -307,6 +308,7 @@ class SourceClipItem:
             "duration": self.duration,
             "created_at": self.created_at,
             "path": self.path,
+            "transcript": self.transcript,
             # display string computed here — the app shows it verbatim
             "meta": f"{mins}:{secs:02d} · "
             + time.strftime("%b %d · %H:%M", time.localtime(self.created_at)),
@@ -342,12 +344,17 @@ class SourceClipStore:
                     name TEXT NOT NULL,
                     filename TEXT NOT NULL,
                     duration REAL,
-                    created_at REAL
+                    created_at REAL,
+                    transcript TEXT DEFAULT ''
                 );
                 """
             )
+            # migrate rows created before the transcript cache existed
+            cols = [r[1] for r in c.execute("PRAGMA table_info(source_clips)")]
+            if "transcript" not in cols:
+                c.execute("ALTER TABLE source_clips ADD COLUMN transcript TEXT DEFAULT ''")
 
-    def save(self, src_path: str, name: str) -> SourceClipItem:
+    def save(self, src_path: str, name: str, transcript: str = "") -> SourceClipItem:
         cid = uuid.uuid4().hex[:12]
         now = time.time()
         ext = Path(src_path).suffix.lower() or ".wav"
@@ -358,11 +365,18 @@ class SourceClipStore:
         name = name.strip() or time.strftime("clip %H:%M:%S", time.localtime(now))
         with self._conn() as c:
             c.execute(
-                "INSERT INTO source_clips(id,name,filename,duration,created_at)"
-                " VALUES(?,?,?,?,?)",
-                (cid, name, fname, duration, now),
+                "INSERT INTO source_clips(id,name,filename,duration,created_at,transcript)"
+                " VALUES(?,?,?,?,?,?)",
+                (cid, name, fname, duration, now, transcript),
             )
-        return SourceClipItem(cid, name, duration, now, str(dest))
+        return SourceClipItem(cid, name, duration, now, str(dest), transcript)
+
+    def set_transcript(self, clip_id: str, transcript: str) -> None:
+        """Backfill the cache for a clip saved before transcription finished."""
+        with self._conn() as c:
+            c.execute(
+                "UPDATE source_clips SET transcript=? WHERE id=?", (transcript, clip_id)
+            )
 
     def list(self) -> list[SourceClipItem]:
         with self._conn() as c:
@@ -373,6 +387,7 @@ class SourceClipStore:
                 SourceClipItem(
                     r["id"], r["name"], r["duration"] or 0.0,
                     r["created_at"] or 0.0, str(self._clips / r["filename"]),
+                    r["transcript"] or "",
                 )
                 for r in rows
             ]

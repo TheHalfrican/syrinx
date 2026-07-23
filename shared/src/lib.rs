@@ -98,8 +98,13 @@ pub trait Engine {
     fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str, label: &str, transcript: &str) -> zbus::Result<u32>;
 
     /// Copy an audio file into the voice-changer clip store; returns the new
-    /// clip id ("" on failure). An empty name gets a time-based default.
-    fn save_source_clip(&self, path: &str, name: &str) -> zbus::Result<String>;
+    /// clip id ("" on failure). An empty name gets a time-based default;
+    /// `transcript` is cached so re-arming the clip skips re-transcription.
+    fn save_source_clip(&self, path: &str, name: &str, transcript: &str) -> zbus::Result<String>;
+
+    /// Backfill a saved clip's transcript cache (for clips saved before
+    /// transcription finished).
+    fn set_source_clip_transcript(&self, clip_id: &str, transcript: &str) -> zbus::Result<()>;
 
     /// Saved voice-changer source clips as a JSON array (newest first).
     fn list_source_clips(&self) -> zbus::Result<String>;

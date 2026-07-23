@@ -720,14 +720,20 @@ class EngineInterface(ServiceInterface):
     # --- voice-changer source clips (named recordings/imports) ----------
 
     @method()
-    async def SaveSourceClip(self, path: "s", name: "s") -> "s":  # noqa: F821
+    async def SaveSourceClip(self, path: "s", name: "s", transcript: "s") -> "s":  # noqa: F821
         """Copy an audio file into the clip store; returns the new clip id
-        ("" on failure). An empty name gets a time-based default."""
+        ("" on failure). An empty name gets a time-based default; *transcript*
+        is cached so re-arming the clip skips re-transcription."""
         try:
-            return self._srcclips.save(path, name).id
+            return self._srcclips.save(path, name, transcript).id
         except Exception:  # noqa: BLE001
             log.exception("SaveSourceClip %s failed", path)
             return ""
+
+    @method()
+    async def SetSourceClipTranscript(self, clip_id: "s", transcript: "s") -> None:  # noqa: F821
+        """Backfill a clip's transcript cache (saved before whisper finished)."""
+        self._srcclips.set_transcript(clip_id, transcript)
 
     @method()
     async def ListSourceClips(self) -> "s":  # noqa: F821

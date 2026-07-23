@@ -63,7 +63,7 @@ enum Cmd {
     VcToggleRecord { system: bool },
     VcPickFile,
     VcConvert { index: usize, label: String, transcript: String },
-    VcSaveClip { name: String },
+    VcSaveClip { name: String, transcript: String },
     VcDeleteClip { id: String },
     VcArmClip { id: String },
     VcAudition { id: String },
@@ -444,7 +444,8 @@ fn main() -> anyhow::Result<()> {
         ui.on_vc_save_clip(move || {
             let ui = ui_weak.unwrap();
             let name = ui.get_vc_clip_name().to_string();
-            let _ = tx.send(Cmd::VcSaveClip { name });
+            let transcript = ui.get_vc_transcript().to_string();
+            let _ = tx.send(Cmd::VcSaveClip { name, transcript });
         });
     }
     {
@@ -1398,7 +1399,7 @@ fn build_captures(json: &str) -> Vec<CaptureItem> {
 async fn refresh_vc_clips(
     ui: &slint::Weak<AppWindow>,
     proxy: &EngineProxy<'_>,
-) -> Vec<(String, String, String)> {
+) -> Vec<(String, String, String, String)> {
     let j = proxy.list_source_clips().await.unwrap_or_else(|_| "[]".into());
     let arr: Vec<serde_json::Value> = serde_json::from_str(&j).unwrap_or_default();
     let mut data = Vec::new();
@@ -1411,7 +1412,7 @@ async fn refresh_vc_clips(
             name: name.clone().into(),
             meta: meta.into(),
         });
-        data.push((id, name, path));
+        data.push((id, name, path, g("transcript")));
     }
     ui.upgrade_in_event_loop(move |ui| {
         ui.set_vc_clips(ModelRc::from(Rc::new(VecModel::from(items))));
@@ -1625,10 +1626,12 @@ async fn worker(
     let mut vc_source: Option<String> = None;       // armed source path
     let mut vc_voice_ids: Vec<String> = Vec::new(); // parallel to the dropdown names
     let mut pending_vc: u32 = 0;                    // in-flight conversion gen id
-    let mut vc_clips_data: Vec<(String, String, String)> = Vec::new(); // (id, name, path)
+    // (id, name, path, cached transcript)
+    let mut vc_clips_data: Vec<(String, String, String, String)> = Vec::new();
     let mut vc_audition_gen: u32 = 0;               // audition playback gen (0 = none)
     let mut vc_audition_id = String::new();         // clip id or "scratch" being played
     let mut pending_vc_tr: u32 = 0;                 // source auto-transcription req id
+    let mut vc_tr_clip = String::new();             // saved clip awaiting transcript backfill
     // create-voice modal state
     let mut cv_rec: Option<tokio::process::Child> = None;
     let cv_wav = cv_wav_path();
@@ -1696,6 +1699,22 @@ async fn worker(
                     if a.req_id == pending_vc_tr && pending_vc_tr != 0 && a.req_id != pending_tr {
                         pending_vc_tr = 0;
                         let text = a.text.to_string();
+                        // clip armed/saved before whisper finished — cache it
+                        if !vc_tr_clip.is_empty() {
+                            if !text.trim().is_empty() {
+                                if let Err(e) =
+                                    proxy.set_source_clip_transcript(&vc_tr_clip, &text).await
+                                {
+                                    tracing::error!("transcript backfill failed: {e}");
+                                }
+                                if let Some(row) =
+                                    vc_clips_data.iter_mut().find(|(cid, _, _, _)| *cid == vc_tr_clip)
+                                {
+                                    row.3 = text.clone();
+                                }
+                            }
+                            vc_tr_clip.clear();
+                        }
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_vc_transcribing(false);
                             ui.set_vc_transcript(text.into());
@@ -1892,6 +1911,7 @@ async fn worker(
                             match proxy.transcribe_file(&vc_wav).await {
                                 Ok(rid) => {
                                     pending_vc_tr = rid;
+                                    vc_tr_clip.clear(); // scratch source — nothing to backfill
                                     ui.upgrade_in_event_loop(|ui| {
                                         ui.set_vc_transcribing(true);
                                         ui.set_vc_transcript("".into());
@@ -2743,6 +2763,7 @@ async fn worker(
                             match proxy.transcribe_file(&vc_wav).await {
                                 Ok(rid) => {
                                     pending_vc_tr = rid;
+                                    vc_tr_clip.clear(); // scratch source — nothing to backfill
                                     ui.upgrade_in_event_loop(|ui| {
                                         ui.set_vc_transcribing(true);
                                         ui.set_vc_transcript("".into());
@@ -2763,6 +2784,7 @@ async fn worker(
                                     vc_rec = Some(child);
                                     vc_elapsed = 0;
                                     pending_vc_tr = 0;  // a stale transcription no longer applies
+                                    vc_tr_clip.clear();
                                     rec_interval.reset();  // first tick a full second out
                                     let mode = if system { "system" } else { "mic" };
                                     ui.upgrade_in_event_loop(move |ui| {
@@ -2801,6 +2823,7 @@ async fn worker(
                         match proxy.transcribe_file(&path).await {
                             Ok(rid) => {
                                 pending_vc_tr = rid;
+                                vc_tr_clip.clear(); // scratch source — nothing to backfill
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_vc_transcribing(true);
                                     ui.set_vc_transcript("".into());
@@ -2833,15 +2856,20 @@ async fn worker(
                         }
                     }
                 }
-                Some(Cmd::VcSaveClip { name }) => {
+                Some(Cmd::VcSaveClip { name, transcript }) => {
                     if let Some(src) = vc_source.clone() {
-                        match proxy.save_source_clip(&src, &name).await {
+                        match proxy.save_source_clip(&src, &name, &transcript).await {
                             Ok(id) if !id.is_empty() => {
+                                // saved mid-transcription: route the pending
+                                // result back into this clip's cache
+                                if pending_vc_tr != 0 {
+                                    vc_tr_clip = id.clone();
+                                }
                                 vc_clips_data = refresh_vc_clips(&ui, &proxy).await;
                                 // arm the stored copy: the scratch wav gets
                                 // overwritten by the next recording
-                                if let Some((cid, cname, cpath)) =
-                                    vc_clips_data.iter().find(|(cid, _, _)| *cid == id).cloned()
+                                if let Some((cid, cname, cpath, _)) =
+                                    vc_clips_data.iter().find(|(cid, _, _, _)| *cid == id).cloned()
                                 {
                                     vc_source = Some(cpath);
                                     ui.upgrade_in_event_loop(move |ui| {
@@ -2874,7 +2902,7 @@ async fn worker(
                     // deleting the armed clip disarms it — its file is gone
                     let disarm = vc_source
                         .as_deref()
-                        .map(|p| !vc_clips_data.iter().any(|(_, _, cp)| cp == p)
+                        .map(|p| !vc_clips_data.iter().any(|(_, _, cp, _)| cp == p)
                             && p.contains("/clips/"))
                         .unwrap_or(false);
                     if disarm {
@@ -2891,10 +2919,11 @@ async fn worker(
                     }).ok();
                 }
                 Some(Cmd::VcArmClip { id }) => {
-                    if let Some((cid, cname, cpath)) =
-                        vc_clips_data.iter().find(|(cid, _, _)| *cid == id).cloned()
+                    if let Some((cid, cname, cpath, ctr)) =
+                        vc_clips_data.iter().find(|(cid, _, _, _)| *cid == id).cloned()
                     {
                         vc_source = Some(cpath.clone());
+                        let cached = ctr.clone();
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_vc_has_source(true);
                             ui.set_vc_source_label(cname.into());
@@ -2903,15 +2932,28 @@ async fn worker(
                             ui.set_vc_error("".into());
                             ui.set_vc_status("".into());
                         }).ok();
-                        match proxy.transcribe_file(&cpath).await {
-                            Ok(rid) => {
-                                pending_vc_tr = rid;
-                                ui.upgrade_in_event_loop(|ui| {
-                                    ui.set_vc_transcribing(true);
-                                    ui.set_vc_transcript("".into());
-                                }).ok();
+                        if !ctr.trim().is_empty() {
+                            // transcript is cached with the clip — no whisper run
+                            pending_vc_tr = 0;
+                            vc_tr_clip.clear();
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_vc_transcribing(false);
+                                ui.set_vc_transcript(cached.into());
+                            }).ok();
+                        } else {
+                            // saved without a transcript (pre-cache row or
+                            // whisper hadn't finished) — transcribe + backfill
+                            match proxy.transcribe_file(&cpath).await {
+                                Ok(rid) => {
+                                    pending_vc_tr = rid;
+                                    vc_tr_clip = id.clone();
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_vc_transcribing(true);
+                                        ui.set_vc_transcript("".into());
+                                    }).ok();
+                                }
+                                Err(e) => tracing::error!("vc transcribe failed: {e}"),
                             }
-                            Err(e) => tracing::error!("vc transcribe failed: {e}"),
                         }
                     }
                 }
@@ -2926,8 +2968,8 @@ async fn worker(
                         let resolved = if id == "scratch" {
                             vc_source.clone().map(|p| (p, "source clip".to_string()))
                         } else {
-                            vc_clips_data.iter().find(|(cid, _, _)| *cid == id)
-                                .map(|(_, n, p)| (p.clone(), n.clone()))
+                            vc_clips_data.iter().find(|(cid, _, _, _)| *cid == id)
+                                .map(|(_, n, p, _)| (p.clone(), n.clone()))
                         };
                         if let Some((path, title)) = resolved {
                             match proxy.play_file(&path, &title).await {
