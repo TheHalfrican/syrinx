@@ -1903,8 +1903,23 @@ export component AppWindow inherits Window {
                                                 Rectangle {
                                                     width: 22px; height: 18px; border-radius: Theme.rad;
                                                     background: vhp.has-hover ? Theme.acc-soft : transparent;
-                                                    vhp := TouchArea { clicked => { root.play-hist(h.id); } }
-                                                    Text { text: "▶"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                                    // toggles like the sample/source-clip auditions:
+                                                    // ■ while this row is the playing clip, ▶ otherwise
+                                                    vhp := TouchArea {
+                                                        clicked => {
+                                                            if (player-id == h.id && player-playing) {
+                                                                root.stop();
+                                                            } else {
+                                                                root.play-hist(h.id);
+                                                            }
+                                                        }
+                                                    }
+                                                    Text {
+                                                        text: player-id == h.id && player-playing ? "■" : "▶";
+                                                        font-size: 11px;
+                                                        color: player-id == h.id && player-playing ? Theme.acc : Theme.dim;
+                                                        horizontal-alignment: center; vertical-alignment: center;
+                                                    }
                                                 }
                                                 Rectangle {
                                                     width: 22px; height: 18px; border-radius: Theme.rad;
