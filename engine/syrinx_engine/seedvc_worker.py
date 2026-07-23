@@ -186,7 +186,9 @@ def _handle_music(req: dict) -> dict:
         rid, vox_i16, demucs_sr, _audio_data(tgt_i16, tgt_rate), req["target"],
         f0=True,  # singing model — melody rides the f0 track
         steps=int(req.get("steps", 30)),
-        auto_f0=bool(req.get("auto_f0", True)),
+        # default OFF: auto-f0 re-registers the melody to the target voice's
+        # median pitch, putting the vocal in a different key than the mix
+        auto_f0=bool(req.get("auto_f0", False)),
         semitone=int(req.get("semitone", 0)),
     )
 

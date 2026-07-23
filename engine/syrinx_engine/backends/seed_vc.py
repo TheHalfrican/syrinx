@@ -163,6 +163,9 @@ class SeedVCBackend:
         log.info("convert-music [%s] -> profile %s", self.engine_name, profile.id)
         return await self._request({
             "cmd": "music", "source": str(source_wav), "target": ref,
-            # singing wants more diffusion steps (upstream recommends 30-50)
-            "steps": max(_steps(), 30), "auto_f0": True, "semitone": semitone,
+            # singing wants more diffusion steps (upstream recommends 30-50).
+            # auto_f0 stays OFF for covers: it transposes the melody to the
+            # target's median pitch — an arbitrary interval that lands the
+            # vocal in a different key than the instrumental it's mixed over.
+            "steps": max(_steps(), 30), "auto_f0": False, "semitone": semitone,
         }, on_stage=on_stage)
