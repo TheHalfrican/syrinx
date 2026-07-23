@@ -45,11 +45,13 @@ fi
     'numpy==1.26.*' 'scipy==1.12.*' 'transformers==4.57.3' \
     'accelerate==0.24.1' 'huggingface_hub<1.0' \
     librosa soundfile encodec unidecode json5 ruamel.yaml tqdm \
-    onnxruntime setuptools safetensors openai-whisper phonemizer g2p_en \
+    onnxruntime 'setuptools<81' safetensors openai-whisper phonemizer g2p_en \
     ipython \
     pyworld einops
 # ipython: vevo_utils has a notebook-era top-level IPython import.
 # pyworld/einops: pulled by Amphion codec modules vevo_utils imports.
+# setuptools<81: pyworld's __init__ imports pkg_resources, removed in newer
+# setuptools (same pin as the main venv's resemble-perth).
 
 SYRINX_VEVO_AMPHION="$AMPHION_DIR" .venv-vevo/bin/python - <<'EOF'
 import os
