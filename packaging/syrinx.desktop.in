@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Syrinx
+GenericName=Voice Studio
+Comment=Voice studio — TTS, voice cloning, and voice conversion
+Exec=@BIN@/syrinx-app
+Icon=syrinx
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=tts;speech;voice;clone;dictation;transcribe;
+# Must equal the app_id from slint::set_xdg_app_id() in app/src/main.rs; Slint
+# leaves the Wayland app_id empty if that call is missing, and nothing matches.
+StartupWMClass=syrinx

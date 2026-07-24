@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=sh.syrinx.Engine
+Exec=@REPO@/engine/.venv/bin/syrinx-engine
+SystemdService=syrinx-engine.service

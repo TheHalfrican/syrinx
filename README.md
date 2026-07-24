@@ -97,3 +97,49 @@ The isolated conversion engines set up with one command each:
 `engine/setup-seedvc.sh` and `engine/setup-vevo.sh` (CUDA auto-detected;
 Seed-VC is GPL-3.0 and Vevo's weights are CC-BY-NC, so both live outside the
 main engine venv and their weights download on first use).
+
+## Install as a desktop app (beta)
+
+Once the engine venv exists (see Quickstart), one command turns this checkout
+into something that behaves like an installed app:
+
+```sh
+scripts/install.sh
+```
+
+That builds the release binaries and installs:
+
+| What | Where |
+|------|-------|
+| `syrinx-app`, `syrinx-dictate`, `syrinx-dictate-pill` | `~/.local/bin/` |
+| systemd `--user` unit (`Type=dbus`) | `~/.config/systemd/user/syrinx-engine.service` |
+| D-Bus activation file | `~/.local/share/dbus-1/services/sh.syrinx.Engine.service` |
+| Launcher entry | `~/.local/share/applications/syrinx.desktop` |
+| Icon | `~/.local/share/icons/hicolor/scalable/apps/syrinx.svg` |
+
+Syrinx then shows up in your app launcher. **The engine is not enabled at
+login and doesn't need to be** — D-Bus activation starts it the moment the app
+or the dictation pill first talks to `sh.syrinx.Engine`, and systemd restarts
+it on failure. The first call after a cold start waits ~15s for model warmup;
+everything after that is instant.
+
+Watch it work:
+
+```sh
+journalctl --user -u syrinx-engine -f
+```
+
+> **Beta caveat — the engine runs from this checkout.** `ExecStart` points at
+> `engine/.venv/bin/syrinx-engine` inside this clone, not at `/usr/bin`. That's
+> deliberate: the engine's venvs (`.venv`, `.venv-seedvc`, `.venv-vevo`) are
+> large and machine-local, and its worker paths resolve relative to the engine
+> source dir. So don't move or delete this directory while Syrinx is installed
+> — if you do relocate it, just re-run `scripts/install.sh` from the new path.
+> A self-contained system-wide package is what `packaging/PKGBUILD` is for.
+
+Uninstall — stops the engine and removes every file listed above, leaving the
+checkout untouched:
+
+```sh
+scripts/install.sh --uninstall
+```

@@ -1,0 +1,18 @@
+# systemd --user unit for the Syrinx engine — rendered by scripts/install.sh.
+# The engine runs FROM THE CHECKOUT: its venvs and worker paths resolve
+# relative to the engine source dir, so ExecStart points there, not /usr/bin.
+#
+# Not enabled at login: D-Bus activation starts it on demand.
+#   journalctl --user -u syrinx-engine -f
+
+[Unit]
+Description=Syrinx voice engine (TTS/STT/VC on D-Bus)
+After=pipewire.service
+
+[Service]
+Type=dbus
+BusName=sh.syrinx.Engine
+ExecStart=@REPO@/engine/.venv/bin/syrinx-engine
+WorkingDirectory=@REPO@/engine
+Restart=on-failure
+RestartSec=2

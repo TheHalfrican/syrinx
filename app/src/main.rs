@@ -152,6 +152,12 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     let ui = AppWindow::new()?;
+
+    // wayland app_id — must match the desktop file's basename (syrinx.desktop)
+    // so launchers/taskbars associate the window. Must come AFTER
+    // AppWindow::new(): set_xdg_app_id needs the platform initialised, and
+    // winit only reads it later, on first show.
+    slint::set_xdg_app_id("syrinx")?;
     let (tx, rx) = mpsc::unbounded_channel::<Cmd>();
 
     // restore the persisted theme before first paint
