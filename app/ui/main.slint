@@ -711,6 +711,9 @@ export component AppWindow inherits Window {
     // SET FROM RUST (window-size watcher) — binding it to root.width here
     // creates a layout-info loop (width -> narrow -> label min-width -> width).
     in property <bool> narrow: false;
+    // cold-launch splash: starts up, cleared by Rust once the first engine
+    // round-trip lands (D-Bus activation + warmup can take 10-20s)
+    in property <bool> booting: true;
 
     // --- state exposed to Rust ---
     in property <[VoiceItem]> voices;   // grid items: [Kokoro card, user voices…, spacers]
@@ -965,6 +968,7 @@ export component AppWindow inherits Window {
     in property <[string]> st-mon-names: ["Default sink monitor"];
     in-out property <int> st-mon-index: 0;
     in property <bool> st-refine: false;
+    in property <bool> st-stop-engine: true;   // default-on; Rust overwrites from config
     in property <string> st-export-dir: "";
     in property <string> st-data-dir: "";
     in property <[string]> st-cap-names: ["3:00"];
@@ -975,6 +979,7 @@ export component AppWindow inherits Window {
     callback st-pick-mic(int);
     callback st-pick-monitor(int);
     callback st-toggle-refine();
+    callback st-toggle-stop-engine();
     callback st-pick-export-dir();
     callback st-pick-cap(int);
     callback st-pick-steps(int);
@@ -2508,6 +2513,30 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            Text { text: "ENGINE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Rectangle {
+                                height: 92px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad; background: Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                VerticalLayout {
+                                    padding: 14px; spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Stop engine on quit"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; horizontal-stretch: 1; }
+                                        TBtn {
+                                            label: st-stop-engine ? "★ On" : "☆ Off"; generate: st-stop-engine;
+                                            clicked => { root.st-toggle-stop-engine(); }
+                                        }
+                                    }
+                                    Text {
+                                        text: "frees ~12 GB of VRAM when Syrinx closes; the engine restarts automatically on next launch";
+                                        font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                        vertical-alignment: center; wrap: word-wrap;
+                                    }
+                                }
+                            }
+
                             Text { text: "PATHS"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 96px;
@@ -3561,6 +3590,73 @@ export component AppWindow inherits Window {
                         clicked => { crop-open = false; root.crop-done(true); }
                     }
                 }
+            }
+        }
+    }
+
+    // --- cold-launch splash --------------------------------------------
+    // Last in the tree on purpose: it covers the nav rail and every view
+    // while the engine wakes up. Primitives only — no assets to theme.
+    property <int> boot-msg: 0;
+    property <[string]> boot-msgs: [
+        "warming up the vocal cords…",
+        "teaching the parrot new words…",
+        "it's pronounced SEER-inks, by the way…",
+        "convincing 12 GB of neurons to wake up…",
+        "tuning the vocal folds to A440…",
+        "rehearsing scales… do, re, mi…",
+        "clearing throat… ahem, ahem…",
+        "pouring coffee for the whisper model…",
+        "aligning the diffusion stars…",
+        "asking the choir to take their places…",
+    ];
+    // pill heights, rotated one step per message so the logo breathes
+    property <[float]> boot-bars: [0.40, 0.74, 1.0, 0.58, 0.30];
+    if booting : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height;
+        background: Theme.win-bg;
+        TouchArea {}   // nothing behind the splash is clickable yet
+        Timer {
+            interval: 2200ms;
+            running: booting;
+            triggered => { boot-msg = mod(boot-msg + 1, boot-msgs.length); }
+        }
+        VerticalLayout {
+            alignment: center; spacing: 18px;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 104px; height: 104px;
+                    border-radius: Theme.name == "win95" ? 0px : 24px;
+                    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                    background: Theme.card-bg;
+                    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                    HorizontalLayout {
+                        alignment: center; spacing: 7px;
+                        // outer cell is the layout's child; the pill inside is
+                        // free to size + centre itself (same trick as PlayerBar)
+                        for b[i] in boot-bars : Rectangle {
+                            width: 8px;
+                            property <float> h: boot-bars[mod(i + boot-msg, boot-bars.length)];
+                            Rectangle {
+                                width: 100%;
+                                height: 16px + parent.h * 46px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: self.width / 2;
+                                background: mod(i, 2) == 0 ? Theme.wave : Theme.acc;
+                                animate height { duration: Theme.reduced-motion ? 0ms : 420ms; easing: ease-in-out; }
+                            }
+                        }
+                    }
+                }
+            }
+            Text {
+                text: "SYRINX"; font-size: 34px; font-weight: 800; letter-spacing: 8px;
+                color: Theme.fg; horizontal-alignment: center;
+            }
+            Text {
+                text: boot-msgs[boot-msg]; font-size: 12px; font-family: Theme.mono;
+                color: Theme.dim; horizontal-alignment: center;
             }
         }
     }

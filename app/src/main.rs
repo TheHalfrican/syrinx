@@ -80,6 +80,7 @@ enum Cmd {
     StPickMic { index: usize },
     StPickMonitor { index: usize },
     StToggleRefine,
+    StToggleStopEngine,
     StPickExportDir,
     StPickCap { index: usize },
     StPickSteps { index: usize },
@@ -107,9 +108,15 @@ enum Cmd {
     FxePreview { hid: String },
 }
 
+/// serde needs a fn for a non-false bool default; `impl Default` below keeps
+/// the no-file path in step with the missing-field one.
+fn default_true() -> bool {
+    true
+}
+
 /// App-side settings (~/.config/syrinx/settings.json) — written by the ⚙
 /// tab, read here at startup and by syrinx-dictate (refine toggle).
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct AppConfig {
     theme: String,
@@ -117,6 +124,25 @@ struct AppConfig {
     monitor_device: String, // "" = default sink's monitor
     refine_dictation: bool,
     export_dir: String,
+    /// opt-out, not opt-in: an idle engine sits on ~12 GB of VRAM, and D-Bus
+    /// activation brings it straight back on the next launch.
+    #[serde(default = "default_true")]
+    stop_engine_on_quit: bool,
+}
+
+// hand-rolled (not derived) so `stop_engine_on_quit` is true with no file at
+// all, exactly as `default_true` makes it true for a file that predates it.
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            theme: String::new(),
+            mic_device: String::new(),
+            monitor_device: String::new(),
+            refine_dictation: false,
+            export_dir: String::new(),
+            stop_engine_on_quit: true,
+        }
+    }
 }
 
 fn config_path() -> std::path::PathBuf {
@@ -166,6 +192,9 @@ fn main() -> anyhow::Result<()> {
         if !cfg.theme.is_empty() {
             ui.global::<Theme>().set_name(cfg.theme.into());
         }
+        // the ⚙ toggle reflects config from the start, not just after the tab
+        // is first opened (SettingsLoad)
+        ui.set_st_stop_engine(cfg.stop_engine_on_quit);
     }
 
     let history = Rc::new(VecModel::<HistItem>::default());
@@ -450,6 +479,10 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_st_toggle_refine(move || { let _ = tx.send(Cmd::StToggleRefine); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_toggle_stop_engine(move || { let _ = tx.send(Cmd::StToggleStopEngine); });
     }
     {
         let tx = tx.clone();
@@ -829,12 +862,27 @@ fn main() -> anyhow::Result<()> {
     let ui_weak = ui.as_weak();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        if let Err(e) = rt.block_on(worker(ui_weak, rx)) {
+        if let Err(e) = rt.block_on(worker(ui_weak.clone(), rx)) {
             tracing::error!("engine worker exited: {e:#}");
+            // a bus that never came up would otherwise strand the splash
+            ui_weak.upgrade_in_event_loop(|ui| ui.set_booting(false)).ok();
         }
     });
 
     ui.run()?;
+
+    // Window closed gracefully: hand the GPU back. Re-read config rather than
+    // trusting a startup copy — the toggle may have been flipped this session.
+    // systemctl, deliberately, and NOT a D-Bus quit(): only the systemd-managed
+    // engine should die here. A dev engine started by hand (`python -m
+    // syrinx_engine`) owns the same bus name but no unit, so `stop` is a
+    // harmless no-op failure there and the dev process survives app restarts.
+    // Only the graceful path runs this — SIGTERM/pkill skip it by design.
+    if load_config().stop_engine_on_quit {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "stop", "syrinx-engine.service"])
+            .status();
+    }
     Ok(())
 }
 
@@ -2053,6 +2101,11 @@ async fn worker(
     let mut lang_codes = update_composer_langs(&ui, "kokoro", "en");
     // effects dropdown: "No effects" + engine presets (builtin + user)
     let (mut effect_ids, mut fxe_presets) = refresh_effect_presets(&ui, &proxy).await;
+    // First engine round-trip is done (D-Bus activation + model warmup, ~10-20s
+    // cold) — drop the splash. Unconditional: every call above swallows its own
+    // errors, and an unreachable engine must land on the normal UI with its
+    // empty states rather than a splash that never leaves.
+    ui.upgrade_in_event_loop(|ui| ui.set_booting(false)).ok();
     // effects chain editor state — the worker owns the chain JSON
     let mut fxe_defs: Vec<serde_json::Value> = Vec::new();
     let mut fxe_chain: Vec<serde_json::Value> = Vec::new();
@@ -3776,6 +3829,7 @@ async fn worker(
                     let steps_idx = ST_STEP_OPTS.iter().position(|s| *s == steps)
                         .map(|i| i as i32).unwrap_or(1);
                     let refine = cfg.refine_dictation;
+                    let stop_engine = cfg.stop_engine_on_quit;
                     let export_dir = cfg.export_dir.clone();
                     let data_dir = std::env::var("SYRINX_DATA_DIR").unwrap_or_else(|_| {
                         format!("{}/.local/share/syrinx", std::env::var("HOME").unwrap_or_default())
@@ -3790,6 +3844,7 @@ async fn worker(
                         ui.set_st_steps_names(ModelRc::from(Rc::new(VecModel::from(steps_names))));
                         ui.set_st_steps_index(steps_idx);
                         ui.set_st_refine(refine);
+                        ui.set_st_stop_engine(stop_engine);
                         ui.set_st_export_dir(export_dir.into());
                         ui.set_st_data_dir(data_dir.into());
                     }).ok();
@@ -3819,6 +3874,12 @@ async fn worker(
                     save_config(&cfg);
                     let on = cfg.refine_dictation;
                     ui.upgrade_in_event_loop(move |ui| ui.set_st_refine(on)).ok();
+                }
+                Some(Cmd::StToggleStopEngine) => {
+                    cfg.stop_engine_on_quit = !cfg.stop_engine_on_quit;
+                    save_config(&cfg);
+                    let on = cfg.stop_engine_on_quit;
+                    ui.upgrade_in_event_loop(move |ui| ui.set_st_stop_engine(on)).ok();
                 }
                 Some(Cmd::StPickExportDir) => {
                     if let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await {
@@ -4201,6 +4262,29 @@ async fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- AppConfig -------------------------------------------------------
+
+    #[test]
+    fn stop_engine_on_quit_defaults_on_with_no_file_and_with_an_old_one() {
+        // no settings.json at all
+        assert!(AppConfig::default().stop_engine_on_quit);
+        // a settings.json written before the field existed
+        let old = r#"{"theme":"rice","mic_device":"","monitor_device":"",
+                      "refine_dictation":true,"export_dir":"/tmp"}"#;
+        let cfg: AppConfig = serde_json::from_str(old).unwrap();
+        assert!(cfg.stop_engine_on_quit);
+        assert_eq!(cfg.theme, "rice"); // the rest of the file still reads back
+        assert!(cfg.refine_dictation);
+    }
+
+    #[test]
+    fn stop_engine_on_quit_round_trips_when_explicitly_off() {
+        let cfg = AppConfig { stop_engine_on_quit: false, ..Default::default() };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"stop_engine_on_quit\":false"));
+        assert!(!serde_json::from_str::<AppConfig>(&json).unwrap().stop_engine_on_quit);
+    }
 
     // --- fmt_dur ---------------------------------------------------------
 
