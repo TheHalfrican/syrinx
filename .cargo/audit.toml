@@ -1,0 +1,11 @@
+# cargo-audit policy — every ignore documents WHY and what unblocks it.
+
+[advisories]
+ignore = [
+    # quick-xml < 0.41 (quadratic parse / NsReader memory exhaustion). Pinned
+    # by wayland-scanner, a BUILD-TIME proc-macro that only ever parses the
+    # vendored Wayland protocol XMLs — no attacker-controlled input exists on
+    # this path. Unblocks when winit's smithay chain bumps wayland-scanner.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

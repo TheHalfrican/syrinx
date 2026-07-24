@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch/PR supersedes whatever is still running.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Rust workspace: app (Slint GUI) + dictate (GTK4 pill) + shared (D-Bus)
+  # ---------------------------------------------------------------------
+  rust:
+    name: Rust — clippy + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Building the workspace compiles native UI toolkits:
+      #   * app     → slint 1.x with the winit backend + femtovg renderer.
+      #               Wayland/X11/xkbcommon are dlopen'd at runtime, but font
+      #               enumeration links libfontconfig at build time (and
+      #               libxkbcommon-dev is Slint's documented Linux prereq).
+      #   * dictate → gtk4 + gtk4-layer-shell, both resolved via pkg-config.
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libfontconfig1-dev \
+            libfreetype-dev \
+            libxkbcommon-dev \
+            libgtk-4-dev
+
+      # gtk4-layer-shell (the dictation pill's wlr-layer-shell binding) is only
+      # packaged from Ubuntu 25.10 onward, and ubuntu-latest is still 24.04 —
+      # so use the distro package when the image has it and otherwise build the
+      # small meson/C library from a pinned tag. Without it `--workspace`
+      # cannot link syrinx-dictate at all.
+      - name: Install gtk4-layer-shell
+        env:
+          GTK4_LAYER_SHELL_VERSION: 1.0.4
+        run: |
+          if apt-cache show libgtk4-layer-shell-dev >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends libgtk4-layer-shell-dev
+          else
+            sudo apt-get install -y --no-install-recommends \
+              meson ninja-build libwayland-dev libwayland-bin wayland-protocols
+            src="$RUNNER_TEMP/gtk4-layer-shell-$GTK4_LAYER_SHELL_VERSION"
+            curl -fsSL "https://github.com/wmww/gtk4-layer-shell/archive/refs/tags/v$GTK4_LAYER_SHELL_VERSION.tar.gz" \
+              | tar -xz -C "$RUNNER_TEMP"
+            meson setup "$src/build" "$src" --prefix=/usr \
+              -Dexamples=false -Ddocs=false -Dtests=false \
+              -Dintrospection=false -Dvapi=false
+            sudo meson install -C "$src/build"
+            sudo ldconfig
+          fi
+          pkg-config --modversion gtk4-layer-shell-0
+
+      # rust-toolchain.toml pins stable + clippy/rustfmt; this keeps the
+      # toolchain install explicit (and pre-warmed) rather than implicit.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+  # ---------------------------------------------------------------------
+  # Python engine: ruff + pytest. Deliberately torch-free — every heavy
+  # import in syrinx_engine is lazy and the suite is written for that, so
+  # this job installs a light dependency set and stays fast.
+  # ---------------------------------------------------------------------
+  python:
+    name: Python — ruff + pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: engine/pyproject.toml
+
+      # --no-deps on the engine install is what keeps kokoro/faster-whisper/
+      # torch (~2.5 GB) out of this job.
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy soundfile dbus-next pytest pytest-cov ruff
+          python -m pip install -e engine --no-deps
+
+      # Lint only — no formatter gate anywhere in this pipeline (deliberate).
+      - name: Lint (ruff)
+        run: ruff check engine
+
+      # The coverage threshold lives in engine/pyproject.toml
+      # [tool.coverage.report] fail_under — never duplicated here.
+      # --cov-config points coverage at it because coverage only auto-discovers
+      # its config in the working directory, and we run from the repo root.
+      - name: Tests + coverage
+        run: python -m pytest engine/tests --cov=syrinx_engine --cov-config=engine/pyproject.toml
+
+  # ---------------------------------------------------------------------
+  # Security audit. Split out because installing the REAL engine deps (torch
+  # & friends) is slow — the test jobs must never wait on it.
+  # ---------------------------------------------------------------------
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: engine/pyproject.toml
+
+      # Unlike the test job, this installs what actually ships. CPU torch from
+      # the PyTorch index keeps the download to a few hundred MB instead of the
+      # multi-GB CUDA wheel — the CVE surface is identical.
+      - name: Install engine dependencies (CPU torch)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e engine
+          python -m pip install pip-audit
+
+      # --skip-editable: syrinx-engine itself is a local editable install with
+      # no PyPI release to audit against.
+      # PYSEC-2026-2290 (transformers, fixed in 5.x): 4.57 is a deliberate,
+      # load-bearing pin — the seed-vc/Amphion research code breaks on
+      # transformers 5. Local-only app, local models; revisit at the next
+      # ML-stack bump.
+      - name: pip-audit (Python dependencies)
+        run: pip-audit --skip-editable --ignore-vuln PYSEC-2026-2290
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Caches ~/.cargo — cargo audit only reads Cargo.lock, so nothing is
+      # compiled here.
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit (Rust dependencies)
+        run: cargo audit

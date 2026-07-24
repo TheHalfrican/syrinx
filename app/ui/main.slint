@@ -706,10 +706,11 @@ export component AppWindow inherits Window {
     preferred-height: 760px;
     background: Theme.win-bg;
     default-font-family: Theme.font;
-    // tiled-half-screen mode (hyprland dwindle): below this width some rows
-    // shorten labels, rails slim down, and the voice grid drops a column.
-    // Full-screen layouts are untouched — this only bites when tiled.
-    property <bool> narrow: root.width < 1250px;
+    // tiled-half-screen mode (hyprland dwindle): below ~1250px some rows
+    // shorten labels, rails slim down, and the voice grid drops columns.
+    // SET FROM RUST (window-size watcher) — binding it to root.width here
+    // creates a layout-info loop (width -> narrow -> label min-width -> width).
+    in property <bool> narrow: false;
 
     // --- state exposed to Rust ---
     in property <[VoiceItem]> voices;   // grid items: [Kokoro card, user voices…, spacers]

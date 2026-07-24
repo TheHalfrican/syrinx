@@ -34,7 +34,7 @@ _PROTO = os.fdopen(os.dup(1), "w")
 os.dup2(2, 1)
 sys.stdout = sys.stderr
 
-import numpy as np
+import numpy as np  # noqa: E402 — after the stdout/path setup above
 
 _STATE = None       # seed_vc stream state (models + cached target features)
 _STATE_F0 = None    # which model the state holds (f0 condition bool)

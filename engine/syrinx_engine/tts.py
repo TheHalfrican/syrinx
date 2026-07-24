@@ -18,7 +18,7 @@ import logging
 import os
 
 from .backends import VoiceInfo, detect_device, make_backend
-from .profiles import Profile, ProfileStore
+from .profiles import ProfileStore
 
 log = logging.getLogger("syrinx.engine.tts")
 

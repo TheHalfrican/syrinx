@@ -23,7 +23,7 @@ _PROTO = os.fdopen(os.dup(1), "w")
 os.dup2(2, 1)
 sys.stdout = sys.stderr
 
-import numpy as np
+import numpy as np  # noqa: E402 — after the stdout/path setup above
 
 _MODEL = None
 _PROMPTS = {}  # sample_path -> encoded prompt

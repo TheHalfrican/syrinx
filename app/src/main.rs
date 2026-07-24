@@ -165,6 +165,28 @@ fn main() -> anyhow::Result<()> {
     let history = Rc::new(VecModel::<HistItem>::default());
     ui.set_history(ModelRc::from(history.clone()));
 
+    // tiled-half-screen watcher: `narrow` must be SET, not bound to
+    // root.width — a width binding puts the label texts inside the window's
+    // own layout-info graph (a binding loop slint deprecates). Polling a
+    // bool 4x/s is imperceptible; the timer must outlive ui.run().
+    let narrow_timer = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        narrow_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(250),
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    let w = ui.window().size().width as f32 / ui.window().scale_factor();
+                    let narrow = w < 1250.0;
+                    if ui.get_narrow() != narrow {
+                        ui.set_narrow(narrow);
+                    }
+                }
+            },
+        );
+    }
+
     // Generate pressed.
     {
         let tx = tx.clone();
@@ -1023,7 +1045,7 @@ fn build_grid(raw: Vec<(String, String)>, profiles_json: &str) -> GridData {
         ..Default::default()
     });
     grid.extend(users);
-    while grid.len() % 3 != 0 {
+    while !grid.len().is_multiple_of(3) {
         grid.push(VoiceData {
             kind: "empty".into(),
             ..Default::default()
@@ -4165,4 +4187,495 @@ async fn worker(
         }
     }
     Ok(())
+}
+
+/// Unit tests for the pure helpers — the JSON→model translations the worker
+/// leans on. No D-Bus, no filesystem, no event loop: everything here is sync
+/// and deterministic.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- fmt_dur ---------------------------------------------------------
+
+    #[test]
+    fn fmt_dur_rounds_to_whole_seconds() {
+        assert_eq!(fmt_dur(0.0), "0:00");
+        assert_eq!(fmt_dur(5.4), "0:05");
+        assert_eq!(fmt_dur(5.6), "0:06");
+        assert_eq!(fmt_dur(59.6), "1:00"); // rounds up across the minute
+        assert_eq!(fmt_dur(65.0), "1:05");
+        assert_eq!(fmt_dur(600.0), "10:00");
+        assert_eq!(fmt_dur(3661.0), "61:01"); // no hours field — minutes keep counting
+    }
+
+    #[test]
+    fn fmt_dur_clamps_junk_to_zero() {
+        assert_eq!(fmt_dur(-3.0), "0:00");
+        assert_eq!(fmt_dur(f64::NAN), "0:00"); // max() prefers the non-NaN operand
+    }
+
+    // --- is_vc_engine ----------------------------------------------------
+
+    #[test]
+    fn is_vc_engine_covers_every_conversion_engine() {
+        for e in ["chatterbox_vc", "seed_vc", "vevo_timbre", "vevo2"] {
+            assert!(is_vc_engine(e), "{e} should be a VC engine");
+        }
+        for e in ["", "kokoro", "qwen", "qwen_custom_voice", "luxtts", "chatterbox", "tada"] {
+            assert!(!is_vc_engine(e), "{e} should not be a VC engine");
+        }
+    }
+
+    #[test]
+    fn vc_engine_id_tables_stay_in_the_vc_family() {
+        assert!(VC_ENGINE_IDS.iter().all(|e| is_vc_engine(e)));
+        assert!(VC_MUSIC_ENGINE_IDS.iter().all(|e| is_vc_engine(e)));
+    }
+
+    // --- build_history ---------------------------------------------------
+
+    #[test]
+    fn build_history_labels_conversions_and_generations() {
+        let json = r#"[
+            {"id": "h1", "voice_name": "Piccolo", "voice_id": "prof:1", "engine": "seed_vc",
+             "language": "en", "duration": 12.0, "text": "hello", "starred": true},
+            {"id": "h2", "voice_name": "Heart", "voice_id": "builtin:kokoro:af_heart",
+             "engine": "kokoro", "language": "en", "duration": 3.0, "text": "hi"},
+            {"id": "h3", "voice_name": "", "voice_id": "prof:9", "engine": "",
+             "language": "es", "duration": 90.0, "text": ""}
+        ]"#;
+        let items = build_history(json);
+        assert_eq!(items.len(), 3);
+
+        // VC rows get the ⇄ prefix set_history_model keys the ⇄ rail off
+        assert_eq!(items[0].id, "h1");
+        assert_eq!(items[0].voice, "Piccolo");
+        assert_eq!(items[0].meta, "⇄ VC · 0:12 · en");
+        assert_eq!(items[0].text, "hello");
+        assert!(items[0].starred);
+
+        // TTS rows lead with the engine id
+        assert_eq!(items[1].meta, "kokoro · 0:03 · en");
+        assert!(!items[1].starred); // absent "starred" defaults to false
+
+        // an empty engine drops the field rather than printing a blank one
+        assert_eq!(items[2].voice, "prof:9"); // voice_name empty → voice_id
+        assert_eq!(items[2].meta, "1:30 · es");
+    }
+
+    #[test]
+    fn build_history_survives_malformed_json() {
+        assert!(build_history("").is_empty());
+        assert!(build_history("not json").is_empty());
+        assert!(build_history("[]").is_empty());
+        assert!(build_history("{\"rows\": []}").is_empty()); // object, not array
+        // rows missing every field still produce a (blank) item
+        let items = build_history(r#"[{}]"#);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "");
+        assert_eq!(items[0].voice, "");
+        assert_eq!(items[0].meta, "0:00 · ");
+    }
+
+    #[test]
+    fn build_history_meta_prefix_matches_the_vc_rail_filter() {
+        // set_history_model splits the ⇄ rail on this exact prefix
+        let json = r#"[{"id": "h1", "voice_name": "V", "engine": "vevo2",
+                        "language": "en", "duration": 4.0}]"#;
+        let items = build_history(json);
+        assert!(items[0].meta.starts_with("⇄ VC"));
+        assert_eq!(items[0].meta.strip_prefix("⇄ VC · "), Some("0:04 · en"));
+    }
+
+    // --- size_label ------------------------------------------------------
+
+    #[test]
+    fn size_label_switches_to_gb_at_1024() {
+        assert_eq!(size_label(0), "0 MB");
+        assert_eq!(size_label(512), "512 MB");
+        assert_eq!(size_label(1023), "1023 MB");
+        assert_eq!(size_label(1024), "1.0 GB");
+        assert_eq!(size_label(1536), "1.5 GB");
+        assert_eq!(size_label(3072), "3.0 GB");
+    }
+
+    // --- build_models ----------------------------------------------------
+
+    #[test]
+    fn build_models_routes_by_category() {
+        let json = r#"[
+            {"id": "kokoro", "display": "Kokoro", "category": "voice", "size_mb": 350,
+             "description": "fast", "downloaded": true, "active": true, "supported": true},
+            {"id": "qwen", "display": "Qwen", "category": "voice", "size_mb": 2048,
+             "downloading": true, "supported": false, "warning": "needs 12 GB VRAM"},
+            {"id": "whisper", "display": "Whisper", "category": "stt", "size_mb": 1500},
+            {"id": "llama", "display": "Llama", "category": "llm", "size_mb": 4096},
+            {"id": "seed_vc", "display": "Seed-VC", "category": "vc", "size_mb": 900},
+            {"id": "mystery", "display": "?", "category": "nonesuch", "size_mb": 1}
+        ]"#;
+        let (voice, stt, llm, vc) = build_models(json);
+        assert_eq!(voice.len(), 2);
+        assert_eq!(stt.len(), 1);
+        assert_eq!(llm.len(), 1);
+        assert_eq!(vc.len(), 1);
+        // unknown categories are dropped, not bucketed somewhere
+
+        assert_eq!(voice[0].id, "kokoro");
+        assert_eq!(voice[0].display, "Kokoro");
+        assert_eq!(voice[0].size_label, "350 MB");
+        assert_eq!(voice[0].description, "fast");
+        assert!(voice[0].downloaded && voice[0].active && voice[0].supported);
+        assert!(!voice[0].downloading);
+        assert_eq!(voice[0].progress, 0.0); // progress is pushed later by set_model_progress
+
+        assert_eq!(voice[1].size_label, "2.0 GB");
+        assert!(voice[1].downloading && !voice[1].downloaded && !voice[1].supported);
+        assert_eq!(voice[1].warning, "needs 12 GB VRAM");
+
+        assert_eq!(stt[0].size_label, "1.5 GB");
+        assert_eq!(llm[0].size_label, "4.0 GB");
+        assert_eq!(vc[0].id, "seed_vc");
+    }
+
+    #[test]
+    fn build_models_survives_malformed_json() {
+        for junk in ["", "nope", "{}", "null"] {
+            let (v, s, l, c) = build_models(junk);
+            assert!(v.is_empty() && s.is_empty() && l.is_empty() && c.is_empty());
+        }
+        // a categoryless row is dropped; a category with no fields still lands
+        let (v, ..) = build_models(r#"[{}, {"category": "voice"}]"#);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, "");
+        assert_eq!(v[0].size_label, "0 MB");
+        assert!(!v[0].downloaded && !v[0].supported);
+    }
+
+    // --- hardware_line ---------------------------------------------------
+
+    #[test]
+    fn hardware_line_names_the_gpu_when_there_is_one() {
+        let json = r#"{"cores": 16, "ram_gb": 62.5, "gpu": true,
+                       "gpu_name": "NVIDIA GeForce RTX 4090"}"#;
+        assert_eq!(hardware_line(json), "16 cores · 62.5 GB RAM · NVIDIA GeForce RTX 4090");
+    }
+
+    #[test]
+    fn hardware_line_falls_back_when_the_gpu_is_unnamed_or_absent() {
+        // present but nameless
+        assert_eq!(
+            hardware_line(r#"{"cores": 8, "ram_gb": 16.0, "gpu": true, "gpu_name": ""}"#),
+            "8 cores · 16.0 GB RAM · GPU"
+        );
+        // absent — the name, if any, is ignored
+        assert_eq!(
+            hardware_line(r#"{"cores": 4, "ram_gb": 7.75, "gpu": false, "gpu_name": "iGPU"}"#),
+            "4 cores · 7.8 GB RAM · no GPU"
+        );
+    }
+
+    #[test]
+    fn hardware_line_survives_malformed_json() {
+        for junk in ["", "not json", "{}", "[]"] {
+            assert_eq!(hardware_line(junk), "0 cores · 0.0 GB RAM · no GPU");
+        }
+    }
+
+    // --- library filters -------------------------------------------------
+
+    #[test]
+    fn lib_engines_for_type_music_lists_the_singing_engines() {
+        let music = lib_engines_for_type(3);
+        assert!(music.contains(&"seed_vc"), "music must offer Seed-VC");
+        assert!(music.contains(&"vevo_timbre"), "music must offer Vevo");
+        assert_eq!(music, VC_MUSIC_ENGINE_IDS.to_vec());
+    }
+
+    #[test]
+    fn lib_engines_for_type_splits_tts_from_conversion() {
+        let tts = lib_engines_for_type(1);
+        assert!(tts.contains(&"kokoro") && tts.contains(&"tada"));
+        assert!(!tts.iter().any(|e| is_vc_engine(e)));
+
+        let speech_vc = lib_engines_for_type(2);
+        assert_eq!(speech_vc, vec!["chatterbox_vc", "seed_vc", "vevo_timbre"]);
+        assert!(speech_vc.iter().all(|e| is_vc_engine(e)));
+    }
+
+    #[test]
+    fn lib_engines_for_type_all_is_the_full_label_table() {
+        let all = lib_engines_for_type(0);
+        assert_eq!(all.len(), LIB_ENGINE_LABELS.len());
+        assert_eq!(lib_engines_for_type(99), all); // out-of-range falls back to All
+        assert_eq!(lib_engines_for_type(-1), all);
+        // every filter option must be labelable in the dropdown
+        for e in &all {
+            assert_ne!(lib_engine_label(e), *e, "{e} has no display label");
+        }
+    }
+
+    #[test]
+    fn lib_engine_label_echoes_unknown_ids() {
+        assert_eq!(lib_engine_label("kokoro"), "Kokoro");
+        assert_eq!(lib_engine_label("seed_vc"), "Seed-VC");
+        assert_eq!(lib_engine_label("brand_new_engine"), "brand_new_engine");
+        assert_eq!(lib_engine_label(""), "");
+    }
+
+    // --- parse_envelope --------------------------------------------------
+
+    #[test]
+    fn parse_envelope_reads_bars_and_duration() {
+        let (bars, dur) = parse_envelope(r#"{"duration": 2.5, "bars": [0.25, 0.5, 1.0]}"#)
+            .expect("well-formed envelope");
+        assert_eq!(bars, vec![0.25f32, 0.5, 1.0]);
+        assert_eq!(dur, 2.5);
+    }
+
+    #[test]
+    fn parse_envelope_skips_non_numeric_bars() {
+        let (bars, dur) = parse_envelope(r#"{"duration": 1.0, "bars": [0.5, "x", null, 0.25]}"#)
+            .expect("partially typed bars still parse");
+        assert_eq!(bars, vec![0.5f32, 0.25]);
+        assert_eq!(dur, 1.0);
+    }
+
+    #[test]
+    fn parse_envelope_rejects_junk_and_degenerate_clips() {
+        assert!(parse_envelope("").is_none());
+        assert!(parse_envelope("not json").is_none());
+        assert!(parse_envelope("{}").is_none()); // no duration
+        assert!(parse_envelope(r#"{"duration": 3.0}"#).is_none()); // no bars
+        assert!(parse_envelope(r#"{"duration": "3", "bars": [0.5]}"#).is_none()); // wrong type
+        assert!(parse_envelope(r#"{"duration": 3.0, "bars": {}}"#).is_none()); // not an array
+        assert!(parse_envelope(r#"{"duration": 3.0, "bars": []}"#).is_none()); // empty
+        assert!(parse_envelope(r#"{"duration": 3.0, "bars": ["x"]}"#).is_none()); // all filtered
+        assert!(parse_envelope(r#"{"duration": 0.0, "bars": [0.5]}"#).is_none()); // zero-length
+        assert!(parse_envelope(r#"{"duration": -1.0, "bars": [0.5]}"#).is_none());
+    }
+
+    // --- build_captures --------------------------------------------------
+
+    #[test]
+    fn build_captures_maps_rows_and_tolerates_junk() {
+        let items = build_captures(
+            r#"[{"id": "c1", "text": "meeting notes", "date": "2026-07-23"}, {}]"#,
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "c1");
+        assert_eq!(items[0].text, "meeting notes");
+        assert_eq!(items[0].date, "2026-07-23");
+        assert_eq!(items[1].id, ""); // missing fields blank out, no panic
+
+        for junk in ["", "nope", "{}"] {
+            assert!(build_captures(junk).is_empty());
+        }
+    }
+
+    // --- fx_fmt ----------------------------------------------------------
+
+    #[test]
+    fn fx_fmt_matches_decimals_to_step_size() {
+        assert_eq!(fx_fmt(12.4, 1.0), "12"); // whole steps → no decimals
+        assert_eq!(fx_fmt(12.6, 5.0), "13");
+        assert_eq!(fx_fmt(0.567, 0.1), "0.6"); // tenth steps → one decimal
+        assert_eq!(fx_fmt(-3.44, 0.5), "-3.4");
+        assert_eq!(fx_fmt(0.5678, 0.01), "0.57"); // finer → two decimals
+        assert_eq!(fx_fmt(0.5678, 0.001), "0.57");
+    }
+
+    // --- kokoro language plumbing ----------------------------------------
+
+    #[test]
+    fn kokoro_lang_code_reads_the_id_prefix() {
+        assert_eq!(kokoro_lang_code("builtin:kokoro:af_heart"), "en");
+        assert_eq!(kokoro_lang_code("builtin:kokoro:bm_george"), "en");
+        assert_eq!(kokoro_lang_code("builtin:kokoro:ef_dora"), "es");
+        assert_eq!(kokoro_lang_code("builtin:kokoro:jf_alpha"), "ja");
+        assert_eq!(kokoro_lang_code("builtin:kokoro:zf_xiaobei"), "zh");
+        // anything unrecognized (or id-less) reads as English
+        assert_eq!(kokoro_lang_code("builtin:kokoro:xx_none"), "en");
+        assert_eq!(kokoro_lang_code(""), "en");
+    }
+
+    #[test]
+    fn kokoro_prefixes_inverts_kokoro_lang_code() {
+        for (code, prefix) in [("es", 'e'), ("fr", 'f'), ("hi", 'h'), ("it", 'i'),
+                               ("ja", 'j'), ("pt", 'p'), ("zh", 'z')] {
+            assert_eq!(kokoro_prefixes(code), &[prefix]);
+            assert_eq!(kokoro_lang_code(&format!("builtin:kokoro:{prefix}f_x")), code);
+        }
+        assert_eq!(kokoro_prefixes("en"), &['a', 'b']);
+        assert_eq!(kokoro_prefixes("klingon"), &['a', 'b']); // unknown → en
+    }
+
+    #[test]
+    fn langs_for_engine_narrows_per_engine() {
+        // chatterbox is the polyglot: the whole table
+        assert_eq!(langs_for_engine("chatterbox").len(), 23);
+        // english-only engines
+        assert_eq!(langs_for_engine("luxtts"), vec![("English", "en")]);
+        assert_eq!(langs_for_engine("chatterbox_turbo"), vec![("English", "en")]);
+        // qwen keeps its own order (zh first), not the alphabetical table's
+        let qwen = langs_for_engine("qwen");
+        assert_eq!(qwen.len(), 10);
+        assert_eq!(qwen[0], ("Chinese", "zh"));
+        assert_eq!(qwen[1], ("English", "en"));
+        assert_eq!(langs_for_engine("qwen_custom_voice"), qwen);
+        // unknown engines fall back to kokoro's subset
+        let kokoro = langs_for_engine("kokoro");
+        assert_eq!(kokoro.len(), 8);
+        assert_eq!(langs_for_engine("brand_new_engine"), kokoro);
+        // every kokoro language must be reachable from an id prefix
+        for (_, code) in &kokoro {
+            let p = kokoro_prefixes(code)[0];
+            assert_eq!(kokoro_lang_code(&format!("builtin:kokoro:{p}f_x")), *code);
+        }
+    }
+
+    // --- profile_err_msg -------------------------------------------------
+
+    #[test]
+    fn profile_err_msg_humanizes_the_duplicate_name_error() {
+        let dup = zbus::Error::Failure(
+            "sqlite3.IntegrityError: UNIQUE constraint failed: profiles.name".into(),
+        );
+        assert_eq!(profile_err_msg(&dup), "A voice with that name already exists.");
+        // anything else passes through as the raw D-Bus message
+        let other = zbus::Error::Failure("engine is busy".into());
+        assert_eq!(profile_err_msg(&other), "engine is busy");
+    }
+
+    // --- build_grid ------------------------------------------------------
+
+    fn raw_voices() -> Vec<(String, String)> {
+        vec![
+            ("builtin:kokoro:af_heart".into(), "Heart".into()),
+            ("builtin:kokoro:bm_george".into(), "George".into()),
+            ("prof:1".into(), "Piccolo".into()),
+        ]
+    }
+
+    #[test]
+    fn build_grid_splits_builtins_from_user_cards() {
+        let profiles = r#"[{"id": "prof:1", "language": "ja", "voice_type": "clone",
+                            "description": "green namekian", "has_personality": true,
+                            "avatar_path": "/tmp/p.png", "avatar_mode": "panel",
+                            "avatar_sx": 10, "avatar_sy": 20, "avatar_side": 300,
+                            "avatar_sh": 400}]"#;
+        let g = build_grid(raw_voices(), profiles);
+
+        assert_eq!(g.kokoro_names, vec!["Heart", "George"]);
+        assert_eq!(g.kokoro_ids, vec!["builtin:kokoro:af_heart", "builtin:kokoro:bm_george"]);
+        assert_eq!(g.default_selected, "builtin:kokoro:af_heart");
+
+        // grid = Kokoro card + user cards, padded to a full 3-column row
+        assert_eq!(g.grid.len(), 3);
+        assert_eq!(g.grid[0].id, "__kokoro__");
+        assert_eq!(g.grid[0].kind, "model-defaults");
+
+        let p = &g.grid[1];
+        assert_eq!(p.id, "prof:1");
+        assert_eq!(p.name, "Piccolo");
+        assert_eq!(p.desc, "green namekian");
+        assert_eq!(p.lang, "ja");
+        assert_eq!(p.kind, "clone");
+        assert!(p.has_personality);
+        assert_eq!(p.avatar_path, "/tmp/p.png");
+        assert_eq!(p.avatar_mode, "panel");
+        assert_eq!((p.avatar_sx, p.avatar_sy, p.avatar_side, p.avatar_sh), (10, 20, 300, 400));
+
+        assert_eq!(g.grid[2].kind, "empty"); // spacer
+    }
+
+    #[test]
+    fn build_grid_pads_to_multiples_of_three() {
+        // 1 kokoro card + n user cards, padded up
+        for (users, want) in [(0, 3), (1, 3), (2, 3), (3, 6), (5, 6), (6, 9)] {
+            let raw: Vec<(String, String)> = (0..users)
+                .map(|i| (format!("prof:{i}"), format!("V{i}")))
+                .collect();
+            let g = build_grid(raw, "[]");
+            assert_eq!(g.grid.len(), want, "{users} user voices");
+            assert!(g.grid.len().is_multiple_of(3));
+            assert_eq!(g.grid.iter().filter(|d| d.kind == "empty").count(), want - users - 1);
+        }
+    }
+
+    #[test]
+    fn build_grid_defaults_profiles_with_no_details() {
+        // profile missing from ListProfiles entirely
+        let g = build_grid(raw_voices(), "[]");
+        let p = &g.grid[1];
+        assert_eq!(p.desc, "");
+        assert_eq!(p.lang, "en");
+        assert_eq!(p.kind, "voice");
+        assert_eq!(p.avatar_mode, "circle");
+        assert!(!p.has_personality);
+
+        // present but description-less: the kind label stands in
+        let g = build_grid(raw_voices(), r#"[{"id": "prof:1", "has_personality": true}]"#);
+        assert_eq!(g.grid[1].desc, "Has personality");
+        let g = build_grid(raw_voices(), r#"[{"id": "prof:1", "description": "   "}]"#);
+        assert_eq!(g.grid[1].desc, "Custom voice"); // whitespace counts as blank
+
+        // malformed profiles JSON degrades to "no details", it doesn't panic
+        let g = build_grid(raw_voices(), "not json");
+        assert_eq!(g.grid[1].lang, "en");
+    }
+
+    #[test]
+    fn build_grid_with_no_builtins_has_no_default_selection() {
+        let g = build_grid(vec![("prof:1".into(), "Piccolo".into())], "[]");
+        assert!(g.kokoro_ids.is_empty());
+        assert_eq!(g.default_selected, "");
+    }
+
+    // --- vp_to_rows ------------------------------------------------------
+
+    fn vp_row(name: &str, desc: &str, lang: &str, engine: &str) -> VpRowData {
+        VpRowData {
+            id: format!("prof:{name}"),
+            name: name.into(),
+            desc: desc.into(),
+            lang: lang.into(),
+            engine: engine.into(),
+            samples: "2".into(),
+            gens: "7".into(),
+            baked: None,
+        }
+    }
+
+    #[test]
+    fn vp_to_rows_filters_case_insensitively_across_columns() {
+        let data = vec![
+            vp_row("Piccolo", "green namekian", "ja", "seed_vc"),
+            vp_row("Heart", "warm narrator", "en", "follows"),
+        ];
+        assert_eq!(vp_to_rows(&data, "").len(), 2); // empty filter keeps everything
+        assert_eq!(vp_to_rows(&data, "  ").len(), 0); // but a space is a real query
+
+        let hits = |q: &str| {
+            vp_to_rows(&data, q).iter().map(|r| r.name.to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(hits("picc"), vec!["Piccolo"]); // name
+        assert_eq!(hits("PICCOLO"), vec!["Piccolo"]); // case-insensitive
+        assert_eq!(hits("narrator"), vec!["Heart"]); // description
+        assert_eq!(hits("ja"), vec!["Piccolo"]); // language
+        assert_eq!(hits("follows"), vec!["Heart"]); // engine
+        assert!(hits("nothing here").is_empty());
+    }
+
+    #[test]
+    fn vp_to_rows_carries_the_row_fields_through() {
+        let data = vec![vp_row("Piccolo", "green namekian", "ja", "seed_vc")];
+        let rows = vp_to_rows(&data, "");
+        assert_eq!(rows[0].id, "prof:Piccolo");
+        assert_eq!(rows[0].desc, "green namekian");
+        assert_eq!(rows[0].engine, "seed_vc");
+        assert_eq!(rows[0].samples, "2");
+        assert_eq!(rows[0].gens, "7");
+        assert!(!rows[0].has_avatar); // no baked thumbnail → placeholder
+    }
 }

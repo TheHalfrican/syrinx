@@ -3,6 +3,11 @@
 //! Both `syrinx-app` and `syrinx-dictate` talk to the Python engine through
 //! this crate, so the interface lives in exactly one place.
 
+// SetProfileAvatar and ConvertVoice take 8 args each; the arity is the engine's
+// D-Bus signature, not ours to shrink, and the lint fires from inside the
+// `zbus::proxy` expansion where an item-level allow can't reach it.
+#![allow(clippy::too_many_arguments)]
+
 use serde::{Deserialize, Serialize};
 
 /// A voice the engine can speak with (built-in or a cloned profile).

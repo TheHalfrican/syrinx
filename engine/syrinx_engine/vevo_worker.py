@@ -43,7 +43,7 @@ _AMPHION = os.environ.get(
 os.chdir(_AMPHION)
 sys.path.insert(0, _AMPHION)
 
-import numpy as np
+import numpy as np  # noqa: E402 — after the stdout/path setup above
 
 _PIPELINE = None
 _PIPELINE_KIND = None  # "timbre" (speech) | "vevo2" (♫ music)

@@ -947,44 +947,44 @@ class EngineInterface(ServiceInterface):
     # --- Signals (return annotation IS the D-Bus signature) -------------
 
     @signal()
-    def GenerationProgress(self, gen_id, state, pct) -> "usd":
+    def GenerationProgress(self, gen_id, state, pct) -> "usd":  # noqa: F821
         return [gen_id, state, pct]
 
     @signal()
-    def AudioLevel(self, gen_id, rms) -> "ud":
+    def AudioLevel(self, gen_id, rms) -> "ud":  # noqa: F821
         return [gen_id, rms]
 
     @signal()
-    def PlaybackInfo(self, gen_id, clip_id, title, duration, bars) -> "ussds":
+    def PlaybackInfo(self, gen_id, clip_id, title, duration, bars) -> "ussds":  # noqa: F821
         # clip_id, display title, seconds, and a JSON array of waveform bars (0..1)
         return [gen_id, clip_id, title, duration, bars]
 
     @signal()
-    def PlaybackProgress(self, gen_id, pct) -> "ud":
+    def PlaybackProgress(self, gen_id, pct) -> "ud":  # noqa: F821
         return [gen_id, pct]
 
     @signal()
-    def LlmResult(self, req_id, text) -> "us":
+    def LlmResult(self, req_id, text) -> "us":  # noqa: F821
         return [req_id, text]
 
     @signal()
-    def TranscribeProgress(self, req_id, partial) -> "us":
+    def TranscribeProgress(self, req_id, partial) -> "us":  # noqa: F821
         return [req_id, partial]
 
     @signal()
-    def TranscribeResult(self, req_id, text) -> "us":
+    def TranscribeResult(self, req_id, text) -> "us":  # noqa: F821
         return [req_id, text]
 
     @signal()
-    def ModelProgress(self, model_id, pct, status) -> "sds":
+    def ModelProgress(self, model_id, pct, status) -> "sds":  # noqa: F821
         return [model_id, pct, status]
 
     @signal()
-    def SpeakStarted(self, gen_id) -> "u":
+    def SpeakStarted(self, gen_id) -> "u":  # noqa: F821
         return gen_id
 
     @signal()
-    def SpeakEnded(self, gen_id) -> "u":
+    def SpeakEnded(self, gen_id) -> "u":  # noqa: F821
         return gen_id
 
     # --- Properties (read-only) -----------------------------------------

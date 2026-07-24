@@ -54,3 +54,40 @@ syrinx-engine = "syrinx_engine.__main__:main"
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["syrinx_engine"]
+# The ML-inference layer is excluded on purpose: loading these needs torch /
+# kokoro / faster-whisper / seed-vc, none of which are in the CI dependency
+# contract (numpy + soundfile + dbus-next + pytest). They are verified by
+# live GPU runs on the 4090 box, not here. Everything else — service, stores,
+# chunking, effects, audio, settings, models — stays measured.
+omit = [
+    "*/backends/*",
+    "*/tts.py",
+    "*/stt.py",
+    "*/llm.py",
+    "*/luxtts_worker.py",
+    "*/seedvc_worker.py",
+    "*/vevo_worker.py",
+    "*/dac_shim.py",
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+# measured 96.6% on the CI dependency set; two points of slack so a small
+# refactor doesn't fail the build before anyone has touched a test
+fail_under = 94
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# ruff's documented default rule set, pinned. Left implicit, ruff 0.16 turns on
+# ~400 rules (S110 on every guarded except-pass, ASYNC230 on the workers' file
+# I/O, …) — a source-wide refactor, not a lint gate. Pinning keeps a ruff
+# upgrade from silently widening the build's definition of "clean".
+select = ["E4", "E7", "E9", "F"]
