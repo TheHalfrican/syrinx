@@ -706,6 +706,10 @@ export component AppWindow inherits Window {
     preferred-height: 760px;
     background: Theme.win-bg;
     default-font-family: Theme.font;
+    // tiled-half-screen mode (hyprland dwindle): below this width some rows
+    // shorten labels, rails slim down, and the voice grid drops a column.
+    // Full-screen layouts are untouched — this only bites when tiled.
+    property <bool> narrow: root.width < 1250px;
 
     // --- state exposed to Rust ---
     in property <[VoiceItem]> voices;   // grid items: [Kokoro card, user voices…, spacers]
@@ -1103,8 +1107,8 @@ export component AppWindow inherits Window {
                                 spacing: 10px;
                                 Text { text: "VOICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; vertical-alignment: center; }
                                 Rectangle {}
-                                TBtn { label: "Import voice"; clicked => { root.import-voice(); } }
-                                TBtn { label: "✦ Create voice"; generate: true; clicked => {
+                                TBtn { label: narrow ? "Import" : "Import voice"; clicked => { root.import-voice(); } }
+                                TBtn { label: narrow ? "✦ Create" : "✦ Create voice"; generate: true; clicked => {
                                     // clear any stale edit-mode state before a fresh create
                                     cv-edit-id = ""; cv-model-index = 0;
                                     cv-lang-index = 0; cv-language = "en";
@@ -1113,15 +1117,56 @@ export component AppWindow inherits Window {
                                     cv-open = true;
                                 } }
                             }
-                            ScrollView {
-                                // 3-column card grid (model padded to a multiple of 3 in Rust,
-                                // so exactly 3 equal columns always render)
+                            // 3-column card grid (model padded to a multiple of 3 in Rust,
+                            // so exactly 3 equal columns always render); tiled-narrow swaps in
+                            // a single-column list below. KEEP THE CARD BODIES IN SYNC.
+                            if !narrow : ScrollView {
                                 GridLayout {
                                     spacing: 16px;
                                     for v[i] in voices : Rectangle {
                                         row: floor(i / 3);
-                                        col: i - floor(i / 3) * 3;
+                                        col: mod(i, 3);
                                         height: 162px;
+                                        if v.kind == "model-defaults" : KokoroCard {
+                                            width: 100%; height: 100%;
+                                            selected: root.selected-voice;
+                                            active: root.kokoro-active;
+                                            names: root.kokoro-names;
+                                            ids: root.kokoro-ids;
+                                            current-index <=> root.kokoro-index;
+                                            pick(id) => {
+                                                root.selected-voice = id;
+                                                root.kokoro-active = true;
+                                                root.select-voice(id);
+                                            }
+                                        }
+                                        if v.kind != "model-defaults" && v.kind != "empty" : VoiceCard {
+                                            width: 100%; height: 100%;
+                                            v: v;
+                                            selected: root.selected-voice;
+                                            clicked => {
+                                                root.selected-voice = v.id;
+                                                root.kokoro-active = false;
+                                                root.select-voice(v.id);
+                                            }
+                                            export-clicked => { root.export-voice(v.id, v.name); }
+                                            edit-clicked => { root.edit-voice(v.id); }
+                                            delete-clicked => { root.del-id = v.id; root.del-name = v.name; }
+                                        }
+                                    }
+                                }
+                            }
+                            // tiled-narrow: ONE column — a half-screen cell can't hold a
+                            // side-panel avatar next to the chips row (VoiceCard doesn't
+                            // clip, so overflow paints over the neighbor). Single-column
+                            // cards are wider than the fullscreen ones and just work.
+                            if narrow : ScrollView {
+                                VerticalLayout {
+                                    spacing: 16px;
+                                    for v[i] in voices : Rectangle {
+                                        // the Rust model pads to a multiple of 3 for the wide
+                                        // grid — collapse the pad cells instead of showing gaps
+                                        height: v.kind == "empty" ? 0px : 162px;
                                         if v.kind == "model-defaults" : KokoroCard {
                                             width: 100%; height: 100%;
                                             selected: root.selected-voice;
@@ -1483,7 +1528,7 @@ export component AppWindow inherits Window {
                         padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 14px;
                         // captures rail — persisted transcripts (text only); click to load
                         VerticalLayout {
-                            width: 210px; spacing: 10px;
+                            width: narrow ? 165px : 210px; spacing: 10px;
                             Text { text: "CAPTURES"; font-size: 12px; font-weight: 700; color: Theme.dim; }
                             ScrollView {
                                 vertical-stretch: 1;
@@ -1610,23 +1655,26 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 spacing: 8px;
                                 TBtn {
-                                    label: tr-recording && tr-rec-mode == "mic" ? "■ Stop" : "● Record mic";
+                                    label: tr-recording && tr-rec-mode == "mic" ? "■ Stop" : (narrow ? "● Mic" : "● Record mic");
                                     generate: tr-recording && tr-rec-mode == "mic";
                                     clicked => { if (!tr-busy) { root.tr-toggle-record("mic"); } }
                                 }
                                 TBtn {
-                                    label: tr-recording && tr-rec-mode == "system" ? "■ Stop" : "◉ Record system";
+                                    label: tr-recording && tr-rec-mode == "system" ? "■ Stop" : (narrow ? "◉ System" : "◉ Record system");
                                     generate: tr-recording && tr-rec-mode == "system";
                                     clicked => { if (!tr-busy) { root.tr-toggle-record("system"); } }
                                 }
                                 TBtn {
-                                    label: "⇪ Import audio…";
+                                    label: narrow ? "⇪ Import…" : "⇪ Import audio…";
                                     clicked => { if (!tr-busy && !tr-recording) { root.tr-pick-file(); } }
                                 }
                                 Rectangle {}
                                 Text {
                                     text: tr-status; font-size: 11px; font-family: Theme.mono;
                                     color: Theme.dim; vertical-alignment: center;
+                                    // tiled-narrow: give way instead of pushing the row wide
+                                    overflow: elide; preferred-width: 0px;
+                                    horizontal-stretch: 1; horizontal-alignment: right;
                                 }
                             }
                             // transcript — editable, scrollable, right-click menu
@@ -1709,6 +1757,8 @@ export component AppWindow inherits Window {
                                     text: "Transcript is editable — fix names before using it.";
                                     font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
                                     vertical-alignment: center;
+                                    // tiled-narrow: this hint yields before the buttons do
+                                    overflow: elide; preferred-width: 0px; horizontal-stretch: 1;
                                 }
                                 Rectangle {}
                                 if tr-has-source : TBtn {
@@ -1741,7 +1791,7 @@ export component AppWindow inherits Window {
                         padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 14px;
                         // saved source clips rail — click to arm, ▶ to audition
                         VerticalLayout {
-                            width: 210px; spacing: 10px;
+                            width: narrow ? 165px : 210px; spacing: 10px;
                             Text { text: "SOURCE CLIPS"; font-size: 12px; font-weight: 700; color: Theme.dim; }
                             ScrollView {
                                 vertical-stretch: 1;
@@ -1838,23 +1888,26 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 spacing: 8px;
                                 TBtn {
-                                    label: vc-recording && vc-rec-mode == "mic" ? "■ Stop" : "● Record mic";
+                                    label: vc-recording && vc-rec-mode == "mic" ? "■ Stop" : (narrow ? "● Mic" : "● Record mic");
                                     generate: vc-recording && vc-rec-mode == "mic";
                                     clicked => { if (!vc-busy) { root.vc-toggle-record("mic"); } }
                                 }
                                 TBtn {
-                                    label: vc-recording && vc-rec-mode == "system" ? "■ Stop" : "◉ Record system";
+                                    label: vc-recording && vc-rec-mode == "system" ? "■ Stop" : (narrow ? "◉ System" : "◉ Record system");
                                     generate: vc-recording && vc-rec-mode == "system";
                                     clicked => { if (!vc-busy) { root.vc-toggle-record("system"); } }
                                 }
                                 TBtn {
-                                    label: "⇪ Import audio…";
+                                    label: narrow ? "⇪ Import…" : "⇪ Import audio…";
                                     clicked => { if (!vc-busy && !vc-recording) { root.vc-pick-file(); } }
                                 }
                                 Rectangle {}
                                 Text {
                                     text: vc-status; font-size: 11px; font-family: Theme.mono;
                                     color: Theme.dim; vertical-alignment: center;
+                                    // tiled-narrow: give way instead of pushing the row wide
+                                    overflow: elide; preferred-width: 0px;
+                                    horizontal-stretch: 1; horizontal-alignment: right;
                                 }
                             }
                             // armed source (history-card-style sunken box) + ▶ verify
@@ -2013,13 +2066,13 @@ export component AppWindow inherits Window {
                                 // key-preserving ±12-semitone steps (deep
                                 // voices sing high songs an octave down)
                                 if vc-mode == "music" : ThemedDropdown {
-                                    width: 88px;
+                                    width: narrow ? 76px : 88px;
                                     model: ["−2 oct", "−1 oct", "±0 oct", "+1 oct", "+2 oct"];
                                     current-index <=> vc-octave-index;
                                 }
                                 TBtn {
                                     label: vc-busy ? "…" : (vc-mode == "music" ? "♫ Convert" : "⇄ Convert");
-                                    generate: true; min-width: 130px;
+                                    generate: true; min-width: narrow ? 100px : 130px;
                                     clicked => {
                                         if (!vc-busy && !vc-recording && vc-has-source && vc-voice-names.length > 0) {
                                             root.vc-convert(vc-voice-index);
@@ -2086,7 +2139,7 @@ export component AppWindow inherits Window {
                         // conversion results rail — the same history rows,
                         // filtered to VC engines (labeled "⇄ VC" in the TTS list)
                         VerticalLayout {
-                            width: 210px; spacing: 10px;
+                            width: narrow ? 165px : 210px; spacing: 10px;
                             Text { text: "CONVERSIONS"; font-size: 12px; font-weight: 700; color: Theme.dim; }
                             ScrollView {
                                 vertical-stretch: 1;
