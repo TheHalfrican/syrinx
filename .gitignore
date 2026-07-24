@@ -45,3 +45,6 @@ engine/.venv-*/
 # seed-vc downloads to ./checkpoints relative to its cwd — the worker runs
 # with cwd pinned OUTSIDE the repo, but never let a stray run commit weights
 /checkpoints/
+.coverage
+htmlcov/
+.pytest_cache/
