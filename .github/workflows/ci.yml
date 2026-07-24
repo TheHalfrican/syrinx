@@ -145,6 +145,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -e engine
+          # a transitive resolver choice lands setuptools 78.1.0 (PYSEC-2025-49 /
+          # PYSEC-2026-3447); nothing in the BASE deps needs pkg_resources (the
+          # <81 pins live in the chatterbox extra + the isolated vevo venv,
+          # neither installed here), so latest is safe in this env
+          python -m pip install --upgrade setuptools
           python -m pip install pip-audit
 
       # --skip-editable: syrinx-engine itself is a local editable install with
